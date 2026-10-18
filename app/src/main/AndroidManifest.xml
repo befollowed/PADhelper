@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.padhelper"
+    android:versionCode="2"
+    android:versionName="1.0.0">
+
+    <application
+        android:allowBackup="false"
+        android:description="@string/xposed_description"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name">
+
+        <!-- 新版 libxposed 模块元数据（LSPosed 2.x 通过 META-INF/xposed/ 识别，不再依赖 xposedmodule） -->
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@xml/scope_list" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_description" />
+    </application>
+</manifest>
