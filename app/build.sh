@@ -4,24 +4,18 @@
 # 为什么不用 Gradle：本机离线缓存里没有 AGP 的 plugin marker，wrapper 又要联网下载发行包；
 # 而 aapt2/d8/apksigner 都在 SDK 里，直接调它们更可靠、更快。
 #
-# 依赖：JDK 11+、Android SDK（build-tools 36.0.0 + platform android-36）、
-#       libxposed api-102.0.0.aar（Gradle 缓存或手动指定 LX_AAR）。
-#
-# 可用环境变量覆盖：SDK、JAVA_HOME、LX_AAR、KEYSTORE
-#   SDK=<sdk路径> LX_AAR=<api-102.0.0.aar 路径> bash app/build.sh
-#
 # 产物：build-output/PADHelper-v<ver>.apk
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$APP_DIR/.." && pwd)"
+ROOT_DIR2="$(cd "$APP_DIR/.." && pwd)"
+ROOT_DIR="$ROOT_DIR2"
 
-JAVAC="${JAVAC:-${JAVA_HOME:-/usr/lib/jvm/default-java}/bin/javac}"
-KEYTOOL="${KEYTOOL:-$(dirname "$JAVAC")/keytool}"
-[ -x "$JAVAC" ] || JAVAC=javac
-[ -x "$KEYTOOL" ] || KEYTOOL=keytool
+JAVA_HOME="${JAVA_HOME:-$HOME/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home}"
+JAVAC="$JAVA_HOME/bin/javac"
+KEYTOOL="$JAVA_HOME/bin/keytool"
 
-SDK="${SDK:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
+SDK="${SDK:-$ANDROID_VOL/Library/Android/sdk}"
 BT="$SDK/build-tools/36.0.0"
 PLATFORM="${PLATFORM:-$SDK/platforms/android-36}"
 AAPT2="$BT/aapt2"
@@ -91,7 +85,7 @@ if [ ! -f "$KEYSTORE" ]; then
         -validity 10000 -storepass padhelper -keypass padhelper \
         -dname "CN=PAD Helper, O=local" >/dev/null 2>&1
 fi
-VERSION="1.0.0"
+VERSION="2.0"
 FINAL="$APP_DIR/build-output/PADHelper-v${VERSION}.apk"
 "$APKSIGNER" sign --ks "$KEYSTORE" --ks-pass pass:padhelper --key-pass pass:padhelper \
     --min-sdk-version 26 --out "$FINAL" "$STAGE/aligned.apk"

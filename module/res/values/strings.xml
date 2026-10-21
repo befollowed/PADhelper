@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PAD Helper</string>
+    <string name="xposed_description">让未持有角色也能使用其解锁的背景音乐/皮肤（实验性，配合 LSPosed 使用）</string>
+</resources>

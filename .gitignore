@@ -1,0 +1,27 @@
+# 构建产物
+build/
+build-output/
+.build/
+.gradle/
+.gradle-home/
+.kotlin/
+*.apk
+*.apk.idsig
+*.dex
+*.class
+
+# 密钥 / 本地配置
+keystore/
+*.jks
+*.keystore
+local.properties
+
+# 大体积第三方工具 jar（可重新获取，不进仓库）
+module/src/lib/r8-*.jar
+module/src/lib/android-stubs-*.jar
+
+# 系统杂项
+.DS_Store
+Thumbs.db
+*.log
+.idea/

@@ -1,0 +1,121 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "org.jetbrains.kotlin.plugin.compose"
+}
+
+// 产物同样放工作区内，理由见根 build.gradle
+layout.buildDirectory = file("${rootDir}/.build/app")
+
+android {
+    namespace "com.niutie.padhelper"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.niutie.padhelper"
+        minSdk 26
+        targetSdk 35
+        versionCode 30
+        versionName "2.7.0"
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+        release {
+            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            signingConfig signingConfigs.debug
+        }
+        release {
+            // 必须开：Compose + material-icons 不裁剪会产出 40+ MB dex
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+
+    buildFeatures {
+        compose true
+        // 界面里的版本号直接取 BuildConfig.VERSION_NAME，避免和 build.gradle 脱节
+        buildConfig true
+    }
+
+    packaging {
+        resources {
+            excludes += [
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/*.kotlin_module",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+            ]
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+// 把成品拷回工程目录，方便直接安装
+tasks.register('copyApkToProjectRoot', Copy) {
+    dependsOn 'assembleRelease'
+    from("${layout.buildDirectory.get()}/outputs/apk/release/app-release.apk")
+    into("${rootDir}/build-output")
+    rename { fileName -> "PADHelper-v${android.defaultConfig.versionName}.apk" }
+}
+
+dependencies {
+    // 新版 libxposed API：LSPosed 2.x 优先识别 META-INF/xposed/module.prop + XposedModule 子类
+    compileOnly "io.github.libxposed:api:102.0.0"
+    // 设置界面用它连框架、写 remote preferences（游戏进程内只读）。
+    // 必须是 implementation：界面进程要真的能调到，缺框架时 start() 会静默失败。
+    // 用 101 而不是 102：102 的 aar-metadata 要求 compileSdk 37，会顶掉 AGP 8.12；
+    // 101 的 getRemotePreferences / XposedServiceHelper 与 102 完全一致，够用。
+    implementation "io.github.libxposed:service:101.0.0"
+
+    // Compose 1.10.3 基线：与 backdrop 1.0.6 的编译期依赖一致，
+    // 且 aar-metadata 要求 compileSdk 36 —— 与 AGP 8.12 工具链兼容。
+    implementation platform("androidx.compose:compose-bom:2026.02.00")
+    implementation "androidx.compose.ui:ui"
+    implementation "androidx.compose.ui:ui-graphics"
+    implementation "androidx.compose.foundation:foundation"
+    implementation "androidx.compose.material3:material3"
+    // 只用了一个 Icons.Filled.Warning。它属于 material-icons-core（不是 material3 的传递依赖，
+    // 得显式声明）。别引 material-icons-extended：5000+ 个图标，光它就有 20+ MB。
+    implementation "androidx.compose.material:material-icons-core"
+    implementation "androidx.activity:activity-compose:1.10.1"
+    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4"
+
+    // 液态玻璃。1.0.6 是单一 AAR（2.x 拆成 KMP 多目标，要求 compileSdk 37 + AGP 9.1）
+    implementation "io.github.kyant0:backdrop:1.0.6"
+}

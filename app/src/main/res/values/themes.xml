@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PADHelper" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#FF1A1A2E</item>
+        <item name="android:navigationBarColor">#FF16213E</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#FF1A1A2E</item>
+    </style>
+</resources>

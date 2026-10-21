@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PAD Helper</string>
-    <string name="xposed_description">智龙迷城：未拥有的皮肤与 BGM 也能在本地生效（存档始终保持合法，不影响联机）</string>
+    <string name="xposed_description">日服PAD，解锁所有珠子皮肤、BGM、徽章</string>
 </resources>
