@@ -6,8 +6,9 @@ set -euo pipefail
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="$(cd "$MODULE_DIR/../.." && pwd)"   # 仓库根（program/ 的上一级）；work/ 在那里
 OUT="${1:-$ROOT_DIR/work/boot/framework-res.apk}"
-SDK="${SDK:-$ANDROID_VOL/Library/Android/sdk/build-tools/36.0.0}"
-AAPT2="$SDK/aapt2"
+SDK="${SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}}"
+BT="${BT:-$SDK/build-tools/36.0.0}"
+AAPT2="$BT/aapt2"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

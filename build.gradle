@@ -4,7 +4,6 @@ plugins {
     id "org.jetbrains.kotlin.plugin.compose" version "2.4.21" apply false
 }
 
-// 构建产物放工作区内，**不要放 /tmp**：macOS 的 /tmp 挂在系统盘，
-// 而本项目在工作外接卷上（$ANDROID_VOL，空间充足）。
-// 放 /tmp 会把几十 GB 构建缓存压到系统盘上。
+// 构建产物放工程目录内的 .build/ 下，**不要放 /tmp**：
+// macOS 的 /tmp 挂在系统盘，几十 GB 的构建缓存会把它压满。
 layout.buildDirectory = file("${rootDir}/.build/root")

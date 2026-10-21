@@ -1,59 +1,66 @@
 PADHelper
 
-LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.5.2 (230503) 的未拥有皮肤 / BGM 本地解锁。
+LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.5.2 (230503) 的未拥有皮肤 / BGM / 徽章本地解锁。
 
-让没有对应角色或装扮的账号，也能在关卡里显示该角色的珠子皮肤、听到该角色的 BGM。
-核心原则是**只改内存，存档始终保存服务器认可的合法值**，因此选关不报错、联机同步不回滚，排除封号风险。
+让没有对应角色或装扮的账号，也能在关卡里显示该角色的珠子皮肤、听到该角色的 BGM、使用未获得的队伍徽章。
+
+核心思路：**客户端照常保存你的选择，上传存档时把皮肤 / BGM / 徽章替换成默认值**；
+服务器全程只看到合法值，因此不报错、不回滚。真实值按账号保存在本地，回推时自动盖回。
 
 > 仅用于自己账号 / 自有设备上的逆向学习研究。
+
+## 支持版本
+
+- 游戏：日服《パズル＆ドラゴンズ》`jp.gungho.pad`
+- 版本：**23.5.2**（versionCode 230503），其它版本模块自动失效（不装 hook、设置页锁定）
+- 系统：Android 8.0+ / LSPosed（libxposed API 102）
 
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [README.md](README.md) | 项目总览、功能现状、原理、安装与构建 |
-| [docs/阶段性总结.md](docs/阶段性总结.md) | 完整技术记录：内存偏移、函数地址、踩坑、待办 |
+| [README.md](README.md) | 项目总览、功能、原理、安装、构建、限制 |
+| [docs/code-wiki/README.md](docs/code-wiki/README.md) | 代码地图：架构、关键类、GOT hook、数据流 |
+| [docs/阶段性总结.md](docs/阶段性总结.md) | 完整技术记录：内存偏移、函数地址、踩坑 |
+| [docs/reverse/libpad-加壳分析报告.md](docs/reverse/libpad-加壳分析报告.md) | libpad.so 加壳静态逆向报告 |
 
 ## 目录结构
 
 ```
-app/
-  build.sh                                   打包脚本（aapt2 + d8 + apksigner，不依赖 Gradle）
-  src/main/cpp/native_probe.c                原生探针：注入游戏进程，读写 savedata
-  src/main/java/com/padhelper/               模块入口（libxposed API 102）与配置
-  src/main/assets/padhelper.properties       默认配置（BGM 替换目录等）
-  src/main/res/                              图标、字符串、作用域
-docs/                                        技术文档与逆向报告
-tools/
-  fswatch/                                   fanotify 文件监视（看游戏读了哪些资源）
-  memdump/                                   跨进程内存读取（/proc/<pid>/mem）
-  unpack_libpad/                             libpad.so 加壳格式解析与 stage-1 提取
-release/                                     成品 APK 
+program/
+  app/
+    build.gradle                              Android 模块（namespace/applicationId = com.niutie.padhelper）
+    src/main/cpp/native_probe.c               原生探针：GOT hook、存档读写、本地存档
+    src/main/java/com/niutie/padhelper/       模块入口、版本锁、配置同步、Compose 设置页
+    src/main/assets/libpadhelper-probe.so     探针编译产物（已入库）
+    src/main/resources/META-INF/xposed/       module.prop / java_init.list / scope.list
+  docs/                                       技术文档与逆向报告
+  module/                                     早期 Xposed 骨架（历史遗留，不参与构建）
+  build-output/                               构建产物（不提交）
 ```
 
 ## 构建
 
-需要 Android NDK（编译探针）、build-tools（打包）、JDK 11+。
+需要 JDK 17+、Android SDK（compileSdk 36）、Android NDK（编译探针）。
 
 ```bash
 # 1. 编译原生探针
-NDK=<你的 NDK 路径>/toolchains/llvm/prebuilt/darwin-x86_64/bin
-$NDK/aarch64-linux-android26-clang -shared -fPIC -O2 \
-    -o app/src/main/assets/libpadhelper-probe.so app/src/main/cpp/native_probe.c -llog
+NDK=$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/darwin-x86_64/bin
+$NDK/aarch64-linux-android26-clang -shared -fPIC -O2 -llog \
+    -o app/src/main/assets/libpadhelper-probe.so app/src/main/cpp/native_probe.c
 
-# 2. 打包（SDK 用环境变量指定）
-SDK=<你的 SDK> bash app/build.sh
-# 产物：app/build-output/PADHelper-v1.0.0.apk
+# 2. 构建 APK
+cd program && ./gradlew copyApkToProjectRoot
+# 产物：build-output/PADHelper-v2.7.0.apk
 ```
 
 详见 [README.md](README.md)。
 
-## 可以接着做的事
+## 已知限制
 
-- **BGM 按队伍生效**：皮肤槽位已定位（`savedata+0x52f3d8+(N-1)*0x60`），BGM 槽位还没定位，
-  思路见 [docs/阶段性总结.md](docs/阶段性总结.md) 第九节。
-- **stage-1 之后的 VM 解密**：`libpad.so` 还有约 12 MB 载荷由 VM 解释器解密，
-  静态路线已走到尽头，见 [docs/reverse/libpad-加壳分析报告.md](docs/reverse/libpad-加壳分析报告.md)。
+- 只支持 23.5.2；游戏升级后需重新逆向并更新偏移。
+- 徽章只存本地（服务器不持久化），首次使用 / 清数据后需重选一次；启动后约 60 秒内改徽章可能被登录回推覆盖。
+- 服务器保存的是默认皮肤 / BGM / 徽章，换设备登录会看到默认值。
 
 ## 声明
 

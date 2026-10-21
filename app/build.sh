@@ -11,11 +11,11 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR2="$(cd "$APP_DIR/.." && pwd)"
 ROOT_DIR="$ROOT_DIR2"
 
-JAVA_HOME="${JAVA_HOME:-$HOME/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home}"
+JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 21 2>/dev/null || echo "$HOME/.jdks/jbr-21")}"
 JAVAC="$JAVA_HOME/bin/javac"
 KEYTOOL="$JAVA_HOME/bin/keytool"
 
-SDK="${SDK:-$ANDROID_VOL/Library/Android/sdk}"
+SDK="${SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}}"
 BT="$SDK/build-tools/36.0.0"
 PLATFORM="${PLATFORM:-$SDK/platforms/android-36}"
 AAPT2="$BT/aapt2"

@@ -11,16 +11,17 @@ MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="$(cd "$MODULE_DIR/../.." && pwd)"
 
 # ---- tool locations -------------------------------------------------------
-JAVA_HOME="${JAVA_HOME:-$HOME/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home}"
+JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 21 2>/dev/null || echo "$HOME/.jdks/jbr-21")}"
 JAVAC="$JAVA_HOME/bin/javac"
 JAVA="$JAVA_HOME/bin/java"
 KEYTOOL="$JAVA_HOME/bin/keytool"
 
-SDK="${SDK:-$ANDROID_VOL/Library/Android/sdk/build-tools/36.0.0}"
-PLATFORM="${PLATFORM:-$ANDROID_VOL/Library/Android/sdk/platforms/android-36}"
-AAPT2="${AAPT2:-$SDK/aapt2}"; ZIPALIGN="$SDK/zipalign"; D8TOOL="$SDK/d8"
+SDK="${SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}}"
+BT="${BT:-$SDK/build-tools/36.0.0}"
+PLATFORM="${PLATFORM:-$SDK/platforms/android-36}"
+AAPT2="${AAPT2:-$BT/aapt2}"; ZIPALIGN="$BT/zipalign"; D8TOOL="$BT/d8"
 D8_JAR="$MODULE_DIR/src/lib/r8-8.7.18.jar"
-APKSIGNER="${APKSIGNER:-$ANDROID_VOL/Library/Android/bin/apksigner}"
+APKSIGNER="${APKSIGNER:-$BT/apksigner}"
 ZIP="${ZIP:-/usr/bin/zip}"; ZIPOPT="-j -q"
 
 # framework jars pulled from the device (see README: ./gradlew-free path)
