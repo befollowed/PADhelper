@@ -27,41 +27,20 @@
 | 珠子皮肤解锁 | ✅ | 未拥有的皮肤可在编成里直接选，关卡内正常显示 |
 | BGM 解锁 | ✅ | 未拥有的 BGM 可在编成里设置，关卡内正常播放 |
 | 队伍徽章解锁 | ✅ | 未获得的徽章不再置灰，可自由选择 |
-| 上传默认化 | ✅ | 上传 `save_decks` 时把每队皮肤 / BGM / 徽章替换为默认值 |
+| 上传默认化 | ✅ | 上传队伍配置时把每队皮肤 / BGM / 徽章替换为默认值 |
 | 本地存档 | ✅ | 真实值按账号保存在本地，回推时自动恢复 |
 | 多账号 | ✅ | 以 `files/data048.bin` 的哈希区分账号，互不串号 |
 | 版本锁 | ✅ | 仅对 23.5.2 生效，升级游戏后自动失效 |
 
 ## 工作原理
 
-```
-游戏内选择皮肤 / BGM / 徽章
-        │  客户端写入 savedata（真实值）
-        ▼
-[GOT hook] _API_REQ_SAVE_DECKS   ← 上传前
-        │  ① 把真实值快照进本地存档
-        │  ② 把请求副本里的皮肤 / BGM / 徽章改成默认值
-        ▼
-   服务器（只看到默认值，不报错）
-        │  回推 save_decks 响应
-        ▼
-[GOT hook] _API_RES_SAVE_DECKS   ← 回推后
-        │  服务器写的默认值 → 用本地真实值盖回
-        ▼
-   游戏内继续显示你的真实皮肤 / BGM / 徽章
-```
+本模块不修改游戏数据本身，而是改「客户端发给服务器的内容」：
 
-- **不修改 `libpad.so` 的 `.text`**：所有 hook 都通过改写 `.got.plt` 槽位（`mprotect` 后写入函数指针）实现，绕开完整性检测。
-- 本地存档与游戏存档完全独立，卸载模块不会破坏游戏数据；服务器上存的是默认值，重装游戏后需要重新选择一次。
+1. 你在编成里选择的皮肤 / BGM / 徽章，客户端照常保存在本机；
+2. 模块在你上传队伍配置前，先把要发送的内容替换成默认值（服务器只看到默认值，因此不会报错）；
+3. 服务器回推配置后，模块再用本机保存的真实值覆盖回去，游戏里继续显示你的选择。
 
-### 关键 hook 点（v23.5.2）
-
-| 符号 | 地址 | GOT 槽 | 作用 |
-|---|---|---|---|
-| `cAPPHTTP::_API_REQ_SAVE_DECKS` | `0x9988c0` | `0x10f3c98` | 上传前默认化 + 快照 |
-| `cAPPHTTP::_API_RES_SAVE_DECKS` | `0x998db0` | `0x10f3ca0` | 回推后盖回本地值 |
-| `cAPPHTTP::_padApiExec` | `0x9d0afc` | `0x10f3948` | 请求 trace（调试用） |
-| `sSAVEDATA…::hasBadge` | `0xa36830` | `0x10ec728` | 徽章不再置灰 |
+真实值只保存在本地，不上传、不联网；服务器端始终是默认值。
 
 ## 安装
 
@@ -85,7 +64,7 @@
 |---|---|
 | `probe.log` | 运行日志（`got: ON`、`def: ON`、`sync0:`、`fast: badge restored once` 等） |
 | `skin.cfg` | 配置：`fast` / `hold` / `gotauto` / `pin` |
-| `skins_<hash>.bin` | 按账号保存的本地存档（32 队 × 0x60 字节） |
+| `skins_<hash>.bin` | 按账号保存的本地存档 |
 | `cmd` | 调试命令入口（写入一行命令，探针读取后执行；同一字符串只执行一次） |
 
 常用调试命令（写入 `cmd` 文件）：
@@ -95,23 +74,7 @@ gottrace      打开请求日志      gotoff    卸载 hook
 defon         上传默认化开      defoff    上传默认化关
 badgeon       徽章解锁开        badgeoff  徽章解锁关
 gotauto 0     关闭自动装 hook   gotauto 1 打开
-r 52f3bc 64   读存档            w16 52f41a 0x4e00  写存档
 ```
-
-## 逆向要点速查
-
-| 项 | 结论 |
-|---|---|
-| 存档基址 | `*(void**)(libpad_base + 0x10de320)` |
-| 队伍记录 | `savedata + 0x52f3bc`，每队 `0x60` 字节，共 32 队 |
-| 皮肤 | 记录 `+0x1c`（u16） |
-| BGM1 / BGM2 | 记录 `+0x18` / `+0x1a`（u16） |
-| 队伍徽章 | 记录 `+0x5f`（u8，存 `真实值 ^ ((i*15+0x61)&0xff)`） |
-| 上传数组 | `q->0x20` 指向的堆副本，字段整体比存档 `+0x0c`（即皮肤在 `+0x28`） |
-| 上传格式 | `decksb={"fmt":1,"decks":[[c1..c5, 徽章, c6, bgm1+bgm2*100000, 皮肤], …]}` |
-| 完整性检测 | 改 `.text` 数秒内静默 `_exit()`；只能改数据 / GOT |
-
-更详细的逆向记录见 [`docs/阶段性总结.md`](docs/阶段性总结.md)、[`docs/存档上传路径与本地化.md`](docs/存档上传路径与本地化.md)、[`docs/code-wiki/README.md`](docs/code-wiki/README.md) 和 [`docs/reverse/libpad-加壳分析报告.md`](docs/reverse/libpad-加壳分析报告.md)。
 
 ## 构建
 
@@ -140,7 +103,7 @@ program/
 ├── app/                         模块 APK（Kotlin + Compose + 原生探针）
 │   ├── build.gradle             namespace / applicationId = com.niutie.padhelper
 │   └── src/main/
-│       ├── cpp/native_probe.c   原生探针：GOT hook、存档读写、本地存档（核心逻辑）
+│       ├── cpp/native_probe.c   原生探针（核心逻辑）
 │       ├── java/com/niutie/padhelper/
 │       │   ├── PadHelperModule.java   模块入口：版本判定 → 装 hook → 加载探针
 │       │   ├── Target.java            版本锁（仅 23.5.2）

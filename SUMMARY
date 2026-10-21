@@ -30,7 +30,7 @@ LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.5.2 (230503) 的未拥有
 program/
   app/
     build.gradle                              Android 模块（namespace/applicationId = com.niutie.padhelper）
-    src/main/cpp/native_probe.c               原生探针：GOT hook、存档读写、本地存档
+    src/main/cpp/native_probe.c               原生探针：上传默认化、存档读写、本地存档
     src/main/java/com/niutie/padhelper/       模块入口、版本锁、配置同步、Compose 设置页
     src/main/assets/libpadhelper-probe.so     探针编译产物（已入库）
     src/main/resources/META-INF/xposed/       module.prop / java_init.list / scope.list
