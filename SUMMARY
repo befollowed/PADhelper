@@ -15,15 +15,6 @@ LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.5.2 (230503) 的未拥有
 - 版本：**23.5.2**（versionCode 230503），其它版本模块自动失效（不装 hook、设置页锁定）
 - 系统：Android 8.0+ / LSPosed（libxposed API 102）
 
-## 文档
-
-| 文档 | 内容 |
-| --- | --- |
-| [README.md](README.md) | 项目总览、功能、原理、安装、构建、限制 |
-| [docs/code-wiki/README.md](docs/code-wiki/README.md) | 代码地图：架构、关键类、GOT hook、数据流 |
-| [docs/阶段性总结.md](docs/阶段性总结.md) | 完整技术记录：内存偏移、函数地址、踩坑 |
-| [docs/reverse/libpad-加壳分析报告.md](docs/reverse/libpad-加壳分析报告.md) | libpad.so 加壳静态逆向报告 |
-
 ## 目录结构
 
 ```
@@ -34,7 +25,6 @@ program/
     src/main/java/com/niutie/padhelper/       模块入口、版本锁、配置同步、Compose 设置页
     src/main/assets/libpadhelper-probe.so     探针编译产物（已入库）
     src/main/resources/META-INF/xposed/       module.prop / java_init.list / scope.list
-  docs/                                       技术文档与逆向报告
   module/                                     早期 Xposed 骨架（历史遗留，不参与构建）
   build-output/                               构建产物（不提交）
 ```

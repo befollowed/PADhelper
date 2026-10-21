@@ -112,7 +112,6 @@ program/
 │       │   └── ui/                    Compose 设置页、图标、主题
 │       ├── assets/libpadhelper-probe.so
 │       └── resources/META-INF/xposed/  module.prop / java_init.list / scope.list
-├── docs/                         技术文档
 ├── build-output/                 构建产物（不提交）
 └── module/                       早期 Xposed 骨架（历史遗留，不参与当前构建）
 ```
