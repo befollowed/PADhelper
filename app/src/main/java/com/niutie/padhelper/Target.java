@@ -8,7 +8,7 @@ import android.content.pm.PackageManager;
 /**
  * 适配版本闸门。
  *
- * <p>本模块的存档偏移、GOT 槽、请求格式全是照着 {@code jp.gungho.pad} v23.5.2 的
+ * <p>本模块的存档偏移、GOT 槽、请求格式全是照着 {@code jp.gungho.pad} v23.6.0 的
  * 二进制写死的：换一个版本轻则功能失效（偏移全错），重则写坏存档或触发服务端校验。
  * 所以策略是「只认这一个版本」，两条闸门：
  *
@@ -28,10 +28,10 @@ public final class Target {
     public static final String PKG = "jp.gungho.pad";
 
     /** 唯一适配的版本。改成新版本前必须重新核对全部偏移。 */
-    public static final String VERSION_NAME = "23.5.2";
+    public static final String VERSION_NAME = "23.6.0";
 
     /** 同版本的 versionCode，仅用于日志/诊断。 */
-    public static final long VERSION_CODE = 230503L;
+    public static final long VERSION_CODE = 230600L;
 
     private Target() {
     }

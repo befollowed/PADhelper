@@ -1,8 +1,8 @@
 PADHelper
 
-LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.5.2 (230503) 的未拥有皮肤 / BGM / 徽章本地解锁。
+LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.6.0 (230600) 的未拥有皮肤 / BGM / 徽章本地解锁。
 
-让没有对应角色或装扮的账号，也能在关卡里显示该角色的珠子皮肤、听到该角色的 BGM、使用未获得的队伍徽章。
+让没有对应角色的账号，也能在关卡里显示该角色的珠子皮肤、听到该角色的 BGM、使用未获得的队伍徽章。
 
 核心思路：**客户端照常保存你的选择，上传存档时把皮肤 / BGM / 徽章替换成默认值**；
 服务器全程只看到合法值，因此不报错、不回滚。真实值按账号保存在本地，回推时自动盖回。
@@ -12,8 +12,9 @@ LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.5.2 (230503) 的未拥有
 ## 支持版本
 
 - 游戏：日服《パズル＆ドラゴンズ》`jp.gungho.pad`
-- 版本：**23.5.2**（versionCode 230503），其它版本模块自动失效（不装 hook、设置页锁定）
-- 系统：Android 8.0+ / LSPosed（libxposed API 102）
+- 版本：**23.6.0**（versionCode 230600），其它版本模块自动失效（不装 hook、设置页锁定）
+- 模块：2.8.0（versionCode 31）
+- 系统：Android 8.0+（minSdk 26）/ LSPosed（libxposed API 102）
 
 ## 目录结构
 
@@ -25,30 +26,44 @@ program/
     src/main/java/com/niutie/padhelper/       模块入口、版本锁、配置同步、Compose 设置页
     src/main/assets/libpadhelper-probe.so     探针编译产物（已入库）
     src/main/resources/META-INF/xposed/       module.prop / java_init.list / scope.list
-  module/                                     早期 Xposed 骨架（历史遗留，不参与构建）
+  tools/libpad_offsets/                       版本升级用的偏移翻译工具
+  module/                                     早期 Xposed 骨架（历史遗留，settings.gradle 不引用）
   build-output/                               构建产物（不提交）
 ```
 
 ## 构建
 
-需要 JDK 17+、Android SDK（compileSdk 36）、Android NDK（编译探针）。
+需要 JDK 21、Android SDK（compileSdk 36）、Android NDK 26.3（编译探针）。
+
+本机 JDK 只有 21，必须显式指定 `JAVA_HOME`；Gradle 用仓库内的离线缓存目录：
 
 ```bash
-# 1. 编译原生探针
+# 1. 编译原生探针（只在改了 native_probe.c 时需要）
 NDK=$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/darwin-x86_64/bin
 $NDK/aarch64-linux-android26-clang -shared -fPIC -O2 -llog \
     -o app/src/main/assets/libpadhelper-probe.so app/src/main/cpp/native_probe.c
 
 # 2. 构建 APK
-cd program && ./gradlew copyApkToProjectRoot
-# 产物：build-output/PADHelper-v2.7.0.apk
+cd program
+export JAVA_HOME="$HOME/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home"
+export GRADLE_USER_HOME="$PWD/.gradle-home"
+./gradlew :app:copyApkToProjectRoot --offline
+# 产物：build-output/PADHelper-v2.8.0.apk
 ```
+
+注意任务必须带 `:app:` —— `copyApkToProjectRoot` 定义在 `app/build.gradle`，
+在根工程下直接跑会 `Task 'copyApkToProjectRoot' not found`。
 
 详见 [README.md](README.md)。
 
+## 版本升级
+
+游戏升级后模块整体失效（偏移全错），需重新适配。
+真机验证通过后再放开，否则有写坏存档的风险。
+
 ## 已知限制
 
-- 只支持 23.5.2；游戏升级后需重新逆向并更新偏移。
+- 只支持 23.6.0；游戏升级后需重新逆向并更新偏移。
 - 徽章只存本地（服务器不持久化），首次使用 / 清数据后需重选一次；启动后约 60 秒内改徽章可能被登录回推覆盖。
 - 服务器保存的是默认皮肤 / BGM / 徽章，换设备登录会看到默认值。
 

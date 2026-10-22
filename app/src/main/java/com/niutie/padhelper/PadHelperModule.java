@@ -46,7 +46,7 @@ public final class PadHelperModule extends XposedModule {
             return;
         }
 
-        // 版本闸门：所有偏移都是对着 23.5.2 写死的，版本不符时一个 hook 都不装。
+        // 版本闸门：所有偏移都是对着 23.6.0 写死的，版本不符时一个 hook 都不装。
         // 放在最前面（连 cfg 同步都不启动），保证进程里不出现任何本模块的痕迹。
         android.content.pm.ApplicationInfo targetInfo = param.getApplicationInfo();
         if (!Target.supported(targetInfo)) {

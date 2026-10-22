@@ -30,7 +30,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<CfgState> = _state.asStateFlow()
 
     /**
-     * 版本闸门。本模块只适配 23.5.2：版本不符时界面提示、开关只读，
+     * 版本闸门。本模块只适配 23.6.0：版本不符时界面提示、开关只读，
      * [commit] 里再兜一层拒绝写入。见 [com.niutie.padhelper.Target]。
      */
     private val _gate = MutableStateFlow(Target.query(app))

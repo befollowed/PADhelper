@@ -254,7 +254,7 @@ private fun FeatureCard(
 
 /**
  * 版本不匹配时的提示卡。只在 [com.niutie.padhelper.Target.Info.supported] 为 false 时出现，
- * 同时所有功能开关置灰只读 —— 本模块的偏移全是照着 23.5.2 写死的，别的版本拨了也没用，
+ * 同时所有功能开关置灰只读 —— 本模块的偏移全是照着 23.6.0 写死的，别的版本拨了也没用，
  * 更糟的是会让人以为「功能开着」。
  */
 @Composable
@@ -365,10 +365,10 @@ private fun AboutCard(
                     Spacer(Modifier.height(8.dp))
                     val steps = listOf(
                         "安装模块并在 LSPosed 中启用",
-                        "勾选作用域 jp.gungho.pad（适配版本：23.5.2）",
+                        "勾选作用域 jp.gungho.pad（适配版本：23.6.0）",
                         "启动游戏，等待探针加载（约 15 秒）",
                         "在编成中选择目标皮肤 / BGM / 徽章",
-                        "进入关卡即生效",
+                        "如模块一直显示未激活，请杀后台重启模块",
                     )
                     steps.forEachIndexed { i, text ->
                         Row(Modifier.padding(vertical = 3.dp)) {

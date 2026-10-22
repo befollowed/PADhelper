@@ -58,8 +58,30 @@ static int g_skin_enabled = 0;
 static int g_bgm_enabled = 0;
 static int g_badge_enabled = 0;
 
-/* 数据目录：优先外部存储（用户可直接用文件管理器改 cmd/skin.cfg，也避开游戏私有目录）。
-   按顺序探测，哪个能写就用哪个；都失败才回落到私有目录。 */
+/* ============ 写存档总闸（v23.6.0 已验证，置 1） ============
+   验证方式（2026-10-22，真机 pid 7605，libpad 30735496）：
+   - GOT 组 4 个槽：got: ON 报出的 slot 差值 = 0x10f7768 / 0x10f7ab8，
+     且槽内静态值 = 0x9d4ad8 / 0x99c4fc / 0xa3a1a4 / 0x99c9ec，两套独立推导互相印证。
+   - 代码补丁点 5 处：用 lr 读运行时 .text，指令与 v23.5.2 运行时 dump 逐字节相同
+     （hasBgm 0xa742c4 = 693300d0 08e28452；门槛 0xe549a0/0xe54a90 = a0feff54 88024079；
+      padapi 0x9d4ad8 = fd7bbca9 f70b00f9；requestExec 0x9d4b50 = fd7bbca9 f85f01a9）。
+   - 存档：0x10e20e0 指针槽 → count=378、条目表 0xc773c4/c8 正常；
+     DECK_REC_BASE 0x52f3bc 的卡牌 ID 与 2.5 上传报文逐字节一致（报文整体 +0x0c 偏移）；
+     +0x1c 皮肤（deck4=11，与用户实际选择一致）、+0x5f 徽章（^key 后 real=1，与默认牌子一致）、
+     +0x18/+0x1a BGM、0x52f3b7 上限=16、位图 0x5312f0/0x5311f0 与 2.5 逐字节相同。
+   因此本版放开写存档与上传默认化。若将来游戏再升级，必须重新验证后再改回 0。 */
+static int g_write_svd = 1;
+/* 所有写存档内存的地方都先过这一关。置 0 可一键回到只读诊断模式。 */
+#define SVD_W_OK() (g_write_svd)
+
+/* 上传报文（save_decks 记录数组）的字段偏移：比存档记录整体 +0x0c
+   （报文头多 12 字节），所以皮肤 +0x28、BGM +0x24/+0x26、徽章 +0x6b。
+   已用 2.5 的 rec hex 与当前存档记录交叉验证。 */
+static int g_write_net = 1;
+
+/* 数据目录：只使用游戏私有目录。外置目录 /storage/emulated/0/... 只在启动时
+   做一次性回迁（见 migrate_files），cmd/skin.cfg 都从这里读，
+   写命令必须写到这个路径：/data/user/0/jp.gungho.pad/files/padhelper/cmd */
 #define BASE_DIR_INTERNAL "/data/user/0/jp.gungho.pad/files/padhelper"
 static char g_base[256];
 static const char *base_dir(void) { return g_base[0] ? g_base : BASE_DIR_INTERNAL; }
@@ -338,7 +360,7 @@ static void savedata_cmd(int do_patch) {
         logline("svd: libpad r-xp not found");
         return;
     }
-    void **got = (void **) (base + 0x10de320);
+    void **got = (void **) (base + 0x10e20e0);
     unsigned long svd = (unsigned long) *got;
     logline("svd: base=%#lx savedata=%#lx patch=%d", base, svd, do_patch);
     if (!svd) return;
@@ -391,7 +413,11 @@ static void savedata_cmd(int do_patch) {
            表现就是「只开一个开关，另一个列表也全解锁」。 */
         int want = (id < 10000u) ? g_skin_enabled : g_bgm_enabled;
         if (do_patch && want && !(flg & 1)) {
-            *(unsigned short *) (e + 0x0e) = (unsigned short) (flg | 1);
+            if (!SVD_W_OK()) {
+                if (patched < 3) logline("svd: WOULD patch entry[%u] flg %#x -> %#x (write disabled)", i, flg, flg | 1);
+            } else {
+                *(unsigned short *) (e + 0x0e) = (unsigned short) (flg | 1);
+            }
             patched++;
         }
     }
@@ -410,7 +436,7 @@ static void savedata_cmd(int do_patch) {
 static unsigned long savedata_ptr(void) {
     unsigned long base = libpad_base();
     if (!base) return 0;
-    return (unsigned long) *(void **) (base + 0x10de320);
+    return (unsigned long) *(void **) (base + 0x10e20e0);
 }
 
 static void cards_cmd(void) {
@@ -444,6 +470,7 @@ static void setcard_cmd(unsigned int idx, unsigned int skin) {
     if (idx >= n) { logline("setcard: idx %u >= count %u", idx, n); return; }
     unsigned char *e = (unsigned char *) (svd + SVD_CARD_ARR_OFF + (unsigned long) idx * CARD_STRIDE);
     unsigned int old = *(unsigned short *) (e + 0x10);
+    if (!SVD_W_OK()) { logline("setcard: WOULD set card[%u] skin %u -> %u (write disabled)", idx, old, skin); return; }
     *(unsigned short *) (e + 0x10) = (unsigned short) skin;
     logline("setcard: card[%u] id=%u skin %u -> %u", idx, *(unsigned int *) e, old, skin);
 }
@@ -761,7 +788,7 @@ static volatile int g_bits_dirty = 1;
 static void skin_bits_cmd(int do_patch) {
     unsigned long base = libpad_base();
     if (!base) { logline("skinbits: no libpad"); return; }
-    unsigned long svd = (unsigned long) *(void **) (base + 0x10de320);
+    unsigned long svd = (unsigned long) *(void **) (base + 0x10e20e0);
     if (!svd) { logline("skinbits: savedata null"); return; }
     unsigned char *sb = skin_bitmap(svd);
     if (!addr_mapped((unsigned long) sb)) { logline("skinbits: bitmap unmapped"); return; }
@@ -770,6 +797,7 @@ static void skin_bits_cmd(int do_patch) {
     logline("bits: skin bitmap nonzero bytes=%u/%#x", nz, BGM_BITMAP_LEN);
     /* 只碰自己这一侧；关掉时完全不动（2.6.2 起没有“还原”这一步）。 */
     if (!do_patch || !g_bits_mode || !g_skin_enabled) return;
+    if (!SVD_W_OK()) { logline("bits: WOULD patch skin bitmap -> 0xff len=%#x (write disabled)", BGM_BITMAP_LEN); return; }
     memset(sb, 0xff, BGM_BITMAP_LEN);
     logline("bits: patched skin bitmap -> 0xff len=%#x", BGM_BITMAP_LEN);
 }
@@ -777,7 +805,7 @@ static void skin_bits_cmd(int do_patch) {
 static void bgm_bits_cmd(int do_patch) {
     unsigned long base = libpad_base();
     if (!base) { logline("bits: no libpad"); return; }
-    unsigned long svd = (unsigned long) *(void **) (base + 0x10de320);
+    unsigned long svd = (unsigned long) *(void **) (base + 0x10e20e0);
     if (!svd) { logline("bits: savedata null"); return; }
     unsigned char *pos = (unsigned char *) (svd + BGM_BITMAP_POS);
     unsigned char *neg = (unsigned char *) (svd + BGM_BITMAP_NEG);
@@ -794,6 +822,7 @@ static void bgm_bits_cmd(int do_patch) {
     logline("bits: bgm bitmap nonzero bytes=%u/%#x", nz, BGM_BITMAP_LEN);
     /* 只碰自己这一侧；关掉时完全不动。 */
     if (do_patch && g_bits_mode && g_bgm_enabled) {
+        if (!SVD_W_OK()) { logline("bits: WOULD patch bgm bitmap -> 0xff len=%#x (write disabled)", BGM_BITMAP_LEN); return; }
         memset(bb, 0xff, BGM_BITMAP_LEN);
         logline("bits: patched bgm bitmap -> 0xff len=%#x", BGM_BITMAP_LEN);
     }
@@ -826,9 +855,12 @@ static void quiet_reapply(void) {
     /* 两个都关：完全停手。不再读快照、不再“还原”——
        游戏下次启动会从服务器拿到当前账号的真实清单。 */
     if (!g_skin_enabled && !g_bgm_enabled) return;
+    /* 诊断版：这条路径原来漏了守卫，会绕过 g_write_svd 直接写存档
+       （378 条准入位 + 两段位图）。v23.6.0 移植期必须先挡住。 */
+    if (!SVD_W_OK()) return;
     unsigned long base = libpad_base();
     if (!base) return;
-    unsigned long svd = (unsigned long) *(void **) (base + 0x10de320);
+    unsigned long svd = (unsigned long) *(void **) (base + 0x10e20e0);
     if (!svd) return;
     unsigned int count = *(unsigned int *) (svd + 0xc773c4);
     unsigned long arr = *(unsigned long *) (svd + 0xc773c8);
@@ -895,9 +927,9 @@ static void code_patch_cmd(void) {
     if (!base) { logline("cpatch: no libpad"); return; }
     static const unsigned int ret1[] = {0x52800020u, 0xd65f03c0u};  /* mov w0,#1 ; ret */
     static const unsigned int nop[] = {0xd503201fu};
-    int r1 = patch_words(base + 0xa70c9c, ret1, 2);
-    int r2 = patch_words(base + 0xe50f4c, nop, 1);
-    int r3 = patch_words(base + 0xe5103c, nop, 1);
+    int r1 = patch_words(base + 0xa742c4, ret1, 2);
+    int r2 = patch_words(base + 0xe549a0, nop, 1);
+    int r3 = patch_words(base + 0xe54a90, nop, 1);
     logline("cpatch: hasBgm=%d gate1=%d gate2=%d", r1, r2, r3);
 }
 
@@ -1005,6 +1037,7 @@ static void mem_write_cmd(int width, unsigned long off, unsigned long val) {
     unsigned long svd = savedata_ptr();
     if (!svd) { logline("w: no savedata"); return; }
     if (!addr_mapped(svd + off)) { logline("w: off=%#lx unmapped", off); return; }
+    if (!SVD_W_OK()) { logline("w: write disabled (diagnostic build), off=%#lx ignored", off); return; }
     if (width == 2) {
         unsigned short old = *(unsigned short *) (svd + off);
         *(unsigned short *) (svd + off) = (unsigned short) val;
@@ -1024,6 +1057,7 @@ static struct pin_ent g_pins[PIN_MAX];
 
 static void pin_apply(void) {
     if (!armed()) return;   /* 存档没准备好之前绝不写：会踩坏游戏初始化 */
+    if (!SVD_W_OK()) return;   /* 诊断版：禁止写存档 */
     unsigned long svd = savedata_ptr();
     if (!svd) return;
     for (int i = 0; i < PIN_MAX; i++) {
@@ -1564,6 +1598,7 @@ static void skin_sync(void) {
     unsigned long svd = savedata_ptr();
     if (!svd || !armed() || !savedata_ready()) return;
     if (!g_hold_enable) return;
+    if (!SVD_W_OK()) return;   /* 诊断版：禁止写存档 */
     if (!addr_mapped(svd + DECK_REC_BASE) || !addr_mapped(svd + DECK_REC_BASE + DECK_COUNT * DECK_STRIDE)) return;
     struct user_slot *U = cur_user();
     if (!U) return;
@@ -1919,10 +1954,10 @@ static unsigned int arm_b(unsigned long from, unsigned long to) {
 static void qd_hook(int on) {
     unsigned long lib = libpad_base();
     if (!lib) { logline("fast: no libpad"); return; }
-    /* 静态偏移：设备上的 libpad.so 与 devdump 的 libpad.runtime.so 同为 30708200 字节，
-       llvm-nm 给出 _ZN8cAPPHTTP12_requestExecEPKcS1_Phj @ 0x9d0b70。
+    /* 静态偏移：设备上的 libpad.so 为 30735496 字节（v23.6.0），
+       _ZN8cAPPHTTP12_requestExecEPKcS1_Phj @ 0x9d4b50（由 .eh_frame FDE 长度序列对齐得出）。
        动态符号表走 GNU_HASH 时拿不到可靠 symcount，索性直接用偏移，不打表。 */
-    unsigned long target = lib + 0x9d0b70UL;
+    unsigned long target = lib + 0x9d4b50UL;
     if (!addr_mapped(target)) {
         logline("fast: requestExec @%#lx not mapped (lib=%#lx)", target, lib);
         return;
@@ -1951,22 +1986,22 @@ static void qd_hook(int on) {
 }
 
 /* ============ GOT 钩子：只改 .got.plt 里的 8 字节指针，绝不碰 .text ============
-   上传链路：_initiateApi -> _API_REQ_SAVE_DECKS(0x9988c0) -> 逐字段拼 0x2000 文本
-             -> _padApiExec(0x9d0afc) -> requestExec -> izHttpPost。
+   上传链路：_initiateApi -> _API_REQ_SAVE_DECKS(0x99c4fc) -> 逐字段拼 0x2000 文本
+             -> _padApiExec(0x9d4ad8) -> requestExec -> izHttpPost。
    这两处调用都走 PLT stub 读 .got.plt 槽；槽里是 R_AARCH64_RELATIVE 在加载时
    填好的函数地址，不会懒绑定重写。把槽换成我们的 C 函数，就能只读地看到
    真正的 param 和 body（不解析 base64、不改存档、不改代码页）。 */
 #define MASK_TAG        0x00ffffffffffffffUL
-#define GOT_SLOT_PADAPI 0x10f3948UL   /* -> cAPPHTTP::_padApiExec */
-#define GOT_SLOT_REQSD  0x10f3c98UL   /* -> cAPPHTTP::_API_REQ_SAVE_DECKS */
-#define GOT_SLOT_HASBADGE 0x10ec728UL /* -> sSAVEDATA::sPLAYER::sDLDATASAVE::hasBadge(int) */
-#define GOT_SLOT_RES    0x10f3ca0UL   /* -> cAPPHTTP::_API_RES_SAVE_DECKS */
-#define FN_PADAPI       0x9d0afcUL
-#define FN_REQSD        0x9988c0UL
-#define FN_HASBADGE     0xa36830UL
-#define FN_RES          0x998db0UL
-#define GOT_SCAN_LO     0x10da000UL
-#define GOT_SCAN_HI     0x1110000UL
+#define GOT_SLOT_PADAPI 0x10f7768UL   /* -> cAPPHTTP::_padApiExec */
+#define GOT_SLOT_REQSD  0x10f7ab8UL   /* -> cAPPHTTP::_API_REQ_SAVE_DECKS */
+#define GOT_SLOT_HASBADGE 0x10f0520UL /* -> sSAVEDATA::sPLAYER::sDLDATASAVE::hasBadge(int) */
+#define GOT_SLOT_RES    0x10f7ac0UL   /* -> cAPPHTTP::_API_RES_SAVE_DECKS */
+#define FN_PADAPI       0x9d4ad8UL
+#define FN_REQSD        0x99c4fcUL
+#define FN_HASBADGE     0xa3a1a4UL
+#define FN_RES          0x99c9ecUL
+#define GOT_SCAN_LO     0x10e2000UL
+#define GOT_SCAN_HI     0x1103000UL
 #define DECK_REC_OFF    0x52f3bcUL
 
 static int (*g_got_padapi)(void *, const char *, unsigned char *, unsigned int);
@@ -2089,7 +2124,14 @@ static int got_reqsd(void *self, void *q) {
         int def_skin = g_skin_enabled;
         int def_bgm = g_bgm_enabled;
         int def_badge = g_badge_enabled;
-        if (g_def_on && (def_skin || def_bgm || def_badge)) {
+        if (g_def_on && (def_skin || def_bgm || def_badge) && !g_write_net) {
+            /* 诊断版：上传记录的字段偏移（0x28 皮肤 / 0x24,0x26 BGM / 0x6b 牌子）
+               同样是 v23.5.2 时代的布局，未经 v23.6.0 验证。写错位置会把畸形数据
+               发给服务器，所以这一版只报告、不改上传内容。 */
+            logline("got: WOULD default %d decks (skin=%d bgm=%d badge=%d) - net write disabled",
+                    n, def_skin, def_bgm, def_badge);
+        }
+        if (g_def_on && (def_skin || def_bgm || def_badge) && g_write_net) {
             for (int i = 0; i < n; i++) {
                 unsigned char *r = (unsigned char *) (arr + (unsigned long) i * 0x60);
                 if (def_skin) *(unsigned short *) (r + 0x28) = 0;  /* 皮肤 -> 默认 */
@@ -2147,7 +2189,7 @@ static int got_res(void *self, void *q) {
     int ret = g_got_res ? g_got_res(self, q) : -1;
     /* 牌子开关关掉后不能再盖回本地值：本地那份可能是我们强开的未拥有牌子，
        继续还原等于「关了没关掉」。让服务端的值原样生效。 */
-    if (ok && g_badge_enabled) {
+    if (ok && g_badge_enabled && SVD_W_OK()) {
         unsigned char *p = (unsigned char *) (sv + DECK_REC_BASE);
         int fixed = 0;
         for (int i = 0; i < n; i++) {
@@ -2219,7 +2261,18 @@ static void got_set(int on) {
         else sr = got_find_slot(lib, fnr);
         if (!sp || !ss || !sh || !sr) {
             static int nf = 0;
-            if (nf++ < 3) logline("got: slot not found padapi=%#lx reqsd=%#lx", sp, ss);
+            if (nf++ < 3) {
+                /* 分别报出每个槽的期望值/实际值，方便下次升级时定位是哪一个失配。
+                   padapi=0 reqsd=0 只说明前两个失败，看不出后两个和「读到了什么」。 */
+                unsigned long vp = addr_mapped(lib + GOT_SLOT_PADAPI) ? *(volatile unsigned long *) (lib + GOT_SLOT_PADAPI) : 0;
+                unsigned long vs = addr_mapped(lib + GOT_SLOT_REQSD) ? *(volatile unsigned long *) (lib + GOT_SLOT_REQSD) : 0;
+                unsigned long vh = addr_mapped(lib + GOT_SLOT_HASBADGE) ? *(volatile unsigned long *) (lib + GOT_SLOT_HASBADGE) : 0;
+                unsigned long vr = addr_mapped(lib + GOT_SLOT_RES) ? *(volatile unsigned long *) (lib + GOT_SLOT_RES) : 0;
+                logline("got: slot not found padapi=%#lx reqsd=%#lx hasbadge=%#lx res=%#lx", sp, ss, sh, sr);
+                logline("got: expect padapi=%#lx reqsd=%#lx hasbadge=%#lx res=%#lx",
+                        fnp, fns, fnh, fnr);
+                logline("got: actual padapi=%#lx reqsd=%#lx hasbadge=%#lx res=%#lx", vp, vs, vh, vr);
+            }
             return;
         }
         g_got_old_padapi = *(volatile unsigned long *) sp;
@@ -2272,7 +2325,7 @@ static void qd_report_ex(int force) {
             g_cur_slot, lh, g_user_switches,
             svd3 ? deck_limit(svd3) : -1,
             g_restored, (int) getpid(),
-            addr_mapped(libpad_base() + 0x9d0b70UL) ? libpad_base() + 0x9d0b70UL : 0UL);
+            addr_mapped(libpad_base() + 0x9d4b50UL) ? libpad_base() + 0x9d4b50UL : 0UL);
     /* 32 队明细只在「和上次打印的不一样」时才打。
        原来每 5 秒无条件打 32 行，真机日志里 92% 都是这些内容完全相同的
        `fast: deckN skin=0`，把真正有用的行全冲掉了，也让文件涨得很快。
@@ -2318,6 +2371,7 @@ static void qd_set(int on) {
 static void skin_apply_sta(void) {
     unsigned long svd = savedata_ptr();
     if (!svd || !armed() || !savedata_ready()) return;
+    if (!SVD_W_OK()) return;   /* 诊断版：禁止写存档 */
     for (int i = 0; i < SKIN_TEAMS; i++) {
         unsigned long off = SKIN_BASE + (unsigned long) i * SKIN_STRIDE;
         if (!addr_mapped(svd + off)) continue;
@@ -2564,6 +2618,8 @@ static void *worker(void *arg) {
     char last[64] = {0};
     g_boot = time(NULL);
     logline("worker started, watching %s", cmd_path());
+    logline("build: target v23.6.0 (libpad 30735496) RELEASE - svd_write=%d net_write=%d",
+            g_write_svd, g_write_net);
 
     for (;;) {
         /* 注入会命中多个进程；只有真正加载了 libpad 的那个才处理命令，
@@ -2798,7 +2854,7 @@ static void *worker(void *arg) {
                 else logline("pin: usage pin <off> <2|4> <val>");
             } else if (strncmp(cmd, "newclear", 8) == 0) {
                 unsigned long sv = savedata_ptr();
-                if (sv && addr_mapped(sv + NEW_BITMAP_POS) && addr_mapped(sv + NEW_BITMAP_NEG)) {
+                if (sv && addr_mapped(sv + NEW_BITMAP_POS) && addr_mapped(sv + NEW_BITMAP_NEG) && SVD_W_OK()) {
                     memset((void *) (sv + NEW_BITMAP_POS), 0, BGM_BITMAP_LEN);
                     memset((void *) (sv + NEW_BITMAP_NEG), 0, BGM_BITMAP_LEN);
                     logline("newclear: both new bitmaps zeroed");

@@ -25,3 +25,6 @@ module/src/lib/android-stubs-*.jar
 Thumbs.db
 *.log
 .idea/
+
+# 本地逆向工具（不公开）
+tools/libpad_offsets/

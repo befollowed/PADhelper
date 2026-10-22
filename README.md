@@ -1,6 +1,6 @@
 # PAD Helper — 《智龙迷城》LSPosed 模块
 
-让**没有对应角色 / 装扮**的账号，也能在关卡里显示该角色的珠子皮肤、听到该角色的 BGM、使用未获得的队伍徽章。
+让**没有对应角色 **的账号，也能在关卡里显示该角色的珠子皮肤、听到该角色的 BGM、使用未获得的队伍徽章。
 
 核心思路：**客户端在本地照常保存你的选择，但在上传存档时把皮肤 / BGM / 徽章替换成默认值**。
 服务器全程只看到合法值，因此不会报错、不会封号；真实值只保存在本地，回推时再盖回去。
@@ -12,15 +12,16 @@
 | 项 | 值 |
 |---|---|
 | 游戏 | 日服《パズル＆ドラゴンズ》`jp.gungho.pad` |
-| 版本 | **23.5.2**（versionCode `230503`），**其它版本不工作** |
-| 系统 | Android 8.0+ / LSPosed（libxposed API 102） |
+| 版本 | **23.6.0**（versionCode `230600`），**其它版本不工作** |
+| 模块 | 2.8.0（versionCode `31`） |
+| 系统 | Android 8.0+（minSdk 26）/ LSPosed（libxposed API 102） |
 
 版本不符时：
 
 - 游戏进程：**不安装任何 hook**，日志打一条 WARN 后直接返回；
 - 设置页：显示「版本不匹配」提示，三个开关全部禁用，无法修改配置。
 
-## 功能（v2.7.0）
+## 功能（v2.8.0）
 
 | 功能 | 状态 | 说明 |
 |---|---|---|
@@ -30,7 +31,7 @@
 | 上传默认化 | ✅ | 上传队伍配置时把每队皮肤 / BGM / 徽章替换为默认值 |
 | 本地存档 | ✅ | 真实值按账号保存在本地，回推时自动恢复 |
 | 多账号 | ✅ | 以 `files/data048.bin` 的哈希区分账号，互不串号 |
-| 版本锁 | ✅ | 仅对 23.5.2 生效，升级游戏后自动失效 |
+| 版本锁 | ✅ | 仅对 23.6.0 生效，升级游戏后自动失效 |
 
 ## 工作原理
 
@@ -42,19 +43,16 @@
 
 真实值只保存在本地，不上传、不联网；服务器端始终是默认值。
 
-## 安装
+实现上分两层：Java 层负责版本判定、LSPosed 入口、加载原生探针与配置同步；
+原生探针负责拦截游戏的网络请求与徽章查询，并读写游戏内存。
 
-1. 安装 `build-output/PADHelper-v2.7.0.apk`（或 Releases 里的同名文件）。
-2. LSPosed 中启用 **PAD Helper**，作用域勾选 **パズドラ**（`jp.gungho.pad`）。
-3. 重启游戏，等 10–20 秒（探针自动安装 hook，日志出现 `got: ON`）。
+> 升级模块后 LSPosed 里的作用域**可能被重置**，装完记得回去确认一眼。
 
 ## 使用
 
-1. 直接在编成里选择想要的皮肤 / BGM / 徽章 —— 不会报错。
+1. 直接在编成里选择想要的皮肤 / BGM / 徽章 。
 2. 正常游玩即可；模块会在上传时自动默认化，回推时自动恢复。
 3. 想关闭某项功能，在模块设置页关掉对应开关（或等待游戏重启）。
-
-设置页三个开关分别对应皮肤、BGM、徽章；关闭后该字段按客户端原值上传（会出现「エラー番号:1」并回滚，属正常现象）。
 
 ## 日志与调试
 
@@ -63,38 +61,38 @@
 | 文件 | 内容 |
 |---|---|
 | `probe.log` | 运行日志（`got: ON`、`def: ON`、`sync0:`、`fast: badge restored once` 等） |
-| `skin.cfg` | 配置：`fast` / `hold` / `gotauto` / `pin` |
+| `probe.status` | 心跳（pid / 时间戳 / 三个开关状态），每 10 秒刷新 |
+| `skin.cfg` | 配置：`cfgver` / `skin` / `bgm` / `badge` / `fast` / `hold` / `gotauto` / `pin` |
 | `skins_<hash>.bin` | 按账号保存的本地存档 |
+| `svd.bin` | 最近一次读到的存档快照（调试用） |
 | `cmd` | 调试命令入口（写入一行命令，探针读取后执行；同一字符串只执行一次） |
 
-常用调试命令（写入 `cmd` 文件）：
+### 发命令
 
-```
-gottrace      打开请求日志      gotoff    卸载 hook
-defon         上传默认化开      defoff    上传默认化关
-badgeon       徽章解锁开        badgeoff  徽章解锁关
-gotauto 0     关闭自动装 hook   gotauto 1 打开
-```
-
-## 构建
-
-需要 JDK 17+、Android SDK（`compileSdk 36`）、NDK（编译探针）。
+`cmd` 只从**游戏私有目录**读取（外部存储不生效），需要 root：
 
 ```bash
-# 1. 编译原生探针
-NDK=$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/darwin-x86_64/bin
-$NDK/aarch64-linux-android26-clang -shared -fPIC -O2 -llog \
-    -o app/src/main/assets/libpadhelper-probe.so \
-    app/src/main/cpp/native_probe.c
-
-# 2. 构建 APK（产物会复制到 build-output/）
-cd program
-./gradlew copyApkToProjectRoot
-# → build-output/PADHelper-v2.7.0.apk
+adb shell su -c 'printf "svd\n" > /data/user/0/jp.gungho.pad/files/padhelper/cmd'
 ```
 
-> 探针 `.so` 已随仓库提交（`app/src/main/assets/libpadhelper-probe.so`），只改 Java/Kotlin 时无需重编 NDK。
-> `.so` 必须与 `native_probe.c` 同步更新，否则会出现「代码改了、行为没变」。
+探针只读第一行 —— **一次一条**，发下一条前等 2～3 秒。
+
+### 常用命令
+
+```
+svd           打印存档条目表统计       deckinfo   打印 32 队记录（皮肤/BGM/徽章）
+svdpath       打印队伍记录原始字节      svdbits    打印两段解锁位图
+cards         卡牌总数与数组           svdnames   导出皮肤名称表
+r <off> <len> 读内存（hex）            lr <off> <len> 读代码段
+dumppad       把游戏原生库各段 dump 到文件（分析用）
+gottrace      打开请求日志             gotoff     卸载 hook
+defon/defoff  上传默认化开/关          badgeon/badgeoff  徽章解锁开/关
+gotauto 0/1   自动装 hook 开/关        fast/fastoff     快速回盖开/关
+```
+
+## 版本升级
+
+游戏升级后本模块会整体失效（偏移全错），需要重新适配。
 
 ## 目录结构
 
@@ -106,21 +104,22 @@ program/
 │       ├── cpp/native_probe.c   原生探针（核心逻辑）
 │       ├── java/com/niutie/padhelper/
 │       │   ├── PadHelperModule.java   模块入口：版本判定 → 装 hook → 加载探针
-│       │   ├── Target.java            版本锁（仅 23.5.2）
+│       │   ├── Target.java            版本锁（仅 23.6.0）
 │       │   ├── ApkManifest.java       直接解析 APK 内的 versionName
 │       │   ├── Config*.java/kt        remote preferences 配置同步
 │       │   └── ui/                    Compose 设置页、图标、主题
 │       ├── assets/libpadhelper-probe.so
 │       └── resources/META-INF/xposed/  module.prop / java_init.list / scope.list
-├── build-output/                 构建产物（不提交）
-└── module/                       早期 Xposed 骨架（历史遗留，不参与当前构建）
+├── tools/libpad_offsets/        版本升级用的偏移翻译工具
+│   ├── fde_align.py             函数长度序列对齐 / 偏移翻译
+│   └── offsets.txt              偏移登记表
+├── build-output/                构建产物（不提交）
+└── module/                      早期 Xposed 骨架（历史遗留，settings.gradle 不引用）
 ```
 
 ## 已知限制
 
-- **只支持 23.5.2**：游戏升级后需要重新逆向并更新偏移；模块会拒绝在其它版本上工作。
-- **徽章纯本地**：服务器不保存徽章，回推时总是给默认值，因此徽章只存在本地存档里；首次使用（或清数据后）需要重新选一次。
-- 启动后约 60 秒是「静默窗口」，期间修改徽章可能被登录回推覆盖，稍等再改即可。
+- **只支持 23.6.0**：游戏升级后需要重新逆向并更新偏移；模块会拒绝在其它版本上工作。
 - 服务器端保存的是默认皮肤 / BGM / 徽章；在另一台设备登录会看到默认值（本地存档不跨设备）。
 - 模块不做账号鉴权之外的任何联网行为。
 
