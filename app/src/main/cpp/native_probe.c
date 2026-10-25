@@ -28,14 +28,16 @@
 static int savedata_ready(void);
 static int armed(void);
 static int addr_mapped(unsigned long a);
+/* cGAMEMAIN 指针（定义在盘面读取区块，timerfix 要用，所以提前声明）。 */
+static unsigned long gm_ptr(void);
 /* 当前账号凭据哈希（data048.bin 的 FNV-1a）。定义在文件后半段的 user_slot 区块，
    这里提前声明：多账号的本地皮肤值要按账号分开。 */
 static unsigned long long cred_hash(void);
 /* 每账号只做一次的徽章相关状态，同样要在换账号时重置，所以提前声明。 */
 static volatile int g_badge_once;
-static volatile long g_quiet_until;
 #include <errno.h>
 #include <dirent.h>
+#include <dlfcn.h>
 
 #define TAG "PADHelperNative"
 
@@ -57,6 +59,30 @@ static volatile long g_quiet_until;
 static int g_skin_enabled = 0;
 static int g_bgm_enabled = 0;
 static int g_badge_enabled = 0;
+
+/* ============ 计时本防退（timerfix） ============
+   背景：计时关卡（TimeAttack）切后台再回前台后，倒计时会永久变成 `---.--`。
+   机制（反汇编 v23.6.0 实证）：
+     - cGAMEMAIN::resume @0x6d08b8 开头**无条件**执行
+         ldrb w10,[impl+0xaffa0]; orr w10,w10,#0x20; strb w10,[impl+0xaffa0]
+       即把 bit5（「计时暂停中」）置上；
+     - 全库没有任何代码清除 bit5，唯一清零是 cGAMEMAIN::init（= 重开一局）；
+     - 绘制 _ZN9cGAMEMAIN20_drawTimeAttackTimerEv @0x8d4cf0 里
+         ldrb w9,[impl+0xaffa0]; tst w9,#0x22222222
+       只要 bit1 或 bit5 置位就画字面量 "---.--"，不走数字路径。
+   所以「切一次后台 → 永久 ---.--」是游戏自身行为，不是模块造成的。
+
+   本开关做的事：每轮检查 impl+0xaffa0，若 bit5 置位就只清这一位。
+   边界（刻意保守）：
+     - **只清 bit5，绝不动 bit1**（bit1 表示「已放弃/已通关」，语义不同）；
+     - 只写这 1 个字节，且仅在 bit5 确实置位时写，其余时间零写入；
+     - impl+0xaffa0 不在 detectCheater 的 hash 区间（impl+0xb7e00..0xb8000）内，
+       也不碰 savedata，因此不会触发完整性比对；
+     - 不碰 .text（铁律：改 .text 会静默退出）。
+   默认关闭：用户不显式打开就一个字节都不写，行为与没装模块一致。 */
+static int g_timerfix_enabled = 0;
+/* 上一次看到的 flags 字节，用来只在变化时打日志（避免 50ms 刷屏）。 */
+static int g_timerfix_last_flags = -1;
 
 /* ============ 写存档总闸（v23.6.0 已验证，置 1） ============
    验证方式（2026-10-22，真机 pid 7605，libpad 30735496）：
@@ -1110,7 +1136,7 @@ static unsigned long watch_now_ms(void) {
     return (unsigned long) ts.tv_sec * 1000UL + (unsigned long) (ts.tv_nsec / 1000000L);
 }
 
-#define WATCH_MAX 32   /* 16 队 × 2（皮肤槽 + 记录首 4 字节） */
+#define WATCH_MAX 64   /* 32 队 × 2（A 存档牌子 + B 编辑缓冲牌子）或 16 队 × 2 皮肤槽 */
 struct watch_ent { unsigned long off; int width; int active; unsigned long last; };
 static struct watch_ent g_watch[WATCH_MAX];
 
@@ -1122,14 +1148,24 @@ static void watch_add(unsigned long off, int width) {
     for (int i = 0; i < WATCH_MAX; i++) {
         if (g_watch[i].active && g_watch[i].off == off && g_watch[i].width == width) return;
     }
+    /* savedata 还没就绪时绝不能解引用：savedata_ptr() 返回 0 的话，
+       0 + off 就是个野地址，读它会直接 SIGSEGV 把游戏带走
+       （曾因 cmd 里残留 bdwatch、启动早期执行，崩在 fault addr 0x52f41b）。 */
+    unsigned long svd = savedata_ptr();
+    if (!svd || !addr_mapped(svd + off)) {
+        logline("watch: skip +%#lx (savedata not ready)", off);
+        return;
+    }
     for (int i = 0; i < WATCH_MAX; i++) {
         if (!g_watch[i].active) {
             g_watch[i].off = off;
             g_watch[i].width = width;
             g_watch[i].active = 1;
-            g_watch[i].last = (width == 2)
-                              ? *(unsigned short *) (savedata_ptr() + off)
-                              : *(unsigned int *) (savedata_ptr() + off);
+            g_watch[i].last = (width == 1)
+                              ? *(unsigned char *) (svd + off)
+                              : (width == 2)
+                              ? *(unsigned short *) (svd + off)
+                              : *(unsigned int *) (svd + off);
             logline("watch: +%#lx w%d start=%#lx", off, width, g_watch[i].last);
             return;
         }
@@ -1149,7 +1185,9 @@ static void watch_sample(void) {
     unsigned long now = watch_now_ms();
     for (int i = 0; i < WATCH_MAX; i++) {
         if (!g_watch[i].active) continue;
-        unsigned long v = (g_watch[i].width == 2)
+        unsigned long v = (g_watch[i].width == 1)
+                          ? *(unsigned char *) (svd + g_watch[i].off)
+                          : (g_watch[i].width == 2)
                           ? *(unsigned short *) (svd + g_watch[i].off)
                           : *(unsigned int *) (svd + g_watch[i].off);
         if (v != g_watch[i].last) {
@@ -1282,6 +1320,15 @@ static int g_trigger;   /* 0 = 网络层 SAVE_DECKS（默认）；1 = 旧的体�
    SKIN_BASE = DECK_REC_BASE + 0x1c，所以以 SKIN_BASE 为基时皮肤偏移是 0。 */
 #define REC_SKIN_OFF 0x1cU                /* 以下都相对一条 0x60 记录的起点 DECK_REC_BASE */
 #define REC_BADGE_OFF 0x5fU
+/* 队伍编辑缓冲（下称 B 数组）= A 数组镜像，基址差 0x1218、记录头多 8 字节。
+   实测依据：mhDeckEdit::setSelectedBadge @0xe63954 里
+     add x8,x21,#0x530,lsl#12 ; add x8,x8,#0x5d4   → svd+0x5305d4
+     smaddl x8,w1,#0x60,x8 ; strb w8,[x12,#0x67]  → B + i*0x60 + 0x67
+   只有 UI 会写 B；服务器回推只写 A。所以「B 变了」是唯一可靠的用户意图信号。 */
+/* 队伍编辑缓冲 B（游戏 UI 换牌子写的才是这块，见 mhDeckEdit::_setSelectedBadge
+   @0xe63954 的 strb [x12,#0x67]）。探针不改它，只在排查时对照用。 */
+#define EDIT_REC_BASE 0x5305d4UL
+#define REC_BADGE_EDIT_OFF 0x67U
 #define REC_BGM1_OFF 0x18U
 #define REC_BGM2_OFF 0x1aU
 #define SKIN_BADGE_MASK 0xf0
@@ -1462,7 +1509,6 @@ static struct user_slot *cur_user(void) {
         g_users[pick].last_used = now;
         g_user_switches++;
         g_badge_once = 0;
-        g_quiet_until = 0;
         logline("fast: switched back to user slot %d cred=%016llx", pick, h);
         user_load(&g_users[pick]);
         return &g_users[pick];
@@ -1476,13 +1522,10 @@ static struct user_slot *cur_user(void) {
     g_cur_slot = pick;
     if (!reused) {
         g_user_switches++;
-        /* 换账号 = 换了一整份存档。下面这些是「每个账号只做一次」的状态，
+        /* 换账号 = 换了一整份存档。g_badge_once 是「每个账号只做一次」的状态，
            必须跟着重置，否则新账号会继承上一个账号的「已经做过了」，
-           表现就是「切号后徽章/皮肤没被盖回」：
-             - g_badge_once：徽章一次性盖回本地牌子；
-             - g_quiet_until：登录后 60 秒「牌子只认本地」的窗口。 */
+           表现就是「切号后徽章没被盖回」。 */
         g_badge_once = 0;
-        g_quiet_until = 0;
         logline("fast: account switched -> reset per-user probe state (slot %d)", pick);
     }
     user_load(&g_users[pick]);
@@ -1593,7 +1636,7 @@ static int is_default_skin(unsigned char v) {
 /* 每轮轮询：先用存档同步 g_local，再把被回推清零的项恢复回去。
    顺序很重要 —— 先吸收用户的合法改动，再做恢复，避免把用户刚选的值当回推覆盖掉。 */
 static volatile int g_got_trace;   /* 打开 body/rec 日志（gottrace） */
-/* g_badge_once / g_quiet_until 的定义在文件头部（换账号时要 reset，所以提前声明） */
+/* g_badge_once 的定义在文件头部（换账号时要 reset，所以提前声明） */
 static void skin_sync(void) {
     unsigned long svd = savedata_ptr();
     if (!svd || !armed() || !savedata_ready()) return;
@@ -1606,16 +1649,29 @@ static void skin_sync(void) {
     int n = deck_limit(svd);
     int dirty = 0;
 
-    /* 登录解析会用服务器的值（默认牌子）覆盖存档，所以这段时间内牌子只认本地 */
-    if (!g_quiet_until) g_quiet_until = (long) time(NULL) + 60;
-    int quiet = (long) time(NULL) < g_quiet_until;
+    /* 牌子有两份并行镜像：
+         A = svd + DECK_REC_BASE(0x52f3bc) + i*0x60 + 0x5f（存档镜像）
+         B = svd + EDIT_REC_BASE(0x5305d4) + i*0x60 + 0x67（UI 编辑缓冲）
+       用户点选时 **先写 B，A 要晚约 1.2 秒才跟上**（bdwatch 实测：B 在
+       t=8654ms 变 0xf->0x19，A 到 t=9892ms 才变）。只读 A 的话，这段窗口里
+       A 还是旧值，会被当成「用户改成了旧值」吸收进本地缓存，等于把用户刚
+       做的选择吃掉 —— 这就是「进去一会儿就换不了」的根因。
+       所以牌子的当前真值以 B 为准。 */
+    unsigned char *eb = (unsigned char *) (svd + EDIT_REC_BASE);
+    int e_ok = addr_mapped(svd + EDIT_REC_BASE) &&
+               addr_mapped(svd + EDIT_REC_BASE + DECK_COUNT * DECK_STRIDE);
+
     if (!g_badge_once) {
         int fixed = 0;
         if (U->have && g_badge_enabled) {
             for (int i = 0; i < n; i++) {
                 unsigned char *cur = p + i * DECK_STRIDE;
                 unsigned char lv = U->local[i][REC_BADGE_OFF];
-                if (lv != 0 && cur[REC_BADGE_OFF] != lv) {
+                unsigned char key = (unsigned char) ((i * 15 + 0x61) & 0xff);
+                /* 只在登录解析把存档写成「默认值」信号（real 0/1）时才补回，
+                   存档里已经是用户选过的真牌子就绝不动它。只在 armed 后跑一次。 */
+                unsigned char real = (unsigned char) (cur[REC_BADGE_OFF] ^ key);
+                if (lv != 0 && cur[REC_BADGE_OFF] != lv && (real == 0 || real == 1)) {
                     cur[REC_BADGE_OFF] = lv;
                     fixed++;
                 }
@@ -1650,24 +1706,41 @@ static void skin_sync(void) {
         /* 牌子：存档里是 real ^ ((i*15+0x61)&0xff)，real 0 = 没戴牌子 */
         {
             unsigned char key = (unsigned char) ((i * 15 + 0x61) & 0xff);
-            unsigned char real = (unsigned char) (cur[REC_BADGE_OFF] ^ key);
             unsigned char lreal = (unsigned char) (loc[REC_BADGE_OFF] ^ key);
-            if (g_got_trace && i < 2 && cur[REC_BADGE_OFF] != loc[REC_BADGE_OFF])
-                logline("bsync: i=%d cur=%#x loc=%#x real=%u lreal=%u quiet=%d",
-                        i, cur[REC_BADGE_OFF], loc[REC_BADGE_OFF], real, lreal, quiet);
-            if (g_badge_enabled && (real == 0 || real == 1 || quiet)) {
-                /* 0=没戴，1=服务器默认牌子：都是「服务器不知道用户真实选择」的信号 */
-                if (U->have && lreal != 0) {
-                    cur[REC_BADGE_OFF] = (unsigned char) (lreal ^ key);
-                    g_restored++;
+
+            /* 牌子：这一轮轮询**只读不写**。
+               轮询是 200ms 一次的无条件循环，只要它偶尔写一次存档，就会和
+               用户在编成界面里的操作抢同一批字节：用户刚选好的牌子，下一轮
+               就被本地缓存里的旧值盖回去 —— 表现就是「进去一会儿就换不了」。
+               2.10.0~2.10.5 反复在这里加窗口、加默认值判据，都是在猜「这一轮
+               的变化是用户点的还是服务器推的」，只要判错一次就吃掉用户的改动。
+               真正的区分点只有一个：**服务器回推只会发生在 req_save_decks 的
+               响应里**，那一段有明确的调用边界可以做前后比对，见 got_res()。
+               所以这里只把游戏当前的牌子吸收进本地缓存（纯内存，不动存档）。
+
+               取「当前真值」一律以 **B（UI 编辑缓冲）** 为准：
+               bdwatch 实测用户点选时 B 在 t=8654ms 变 0xf->0x19，A 到
+               t=9892ms 才跟着变。若读 A，这 1.2 秒窗口内读到的是旧值，会
+               把本地记录改回旧值（实测就是 `bsync: deck2 adopt 112`），用户
+               刚选的 102 被吃掉。服务器回推那一侧由 got_res() 单独兜（它拿
+               A 做前后比对），所以轮询这边可以放心只认 B。 */
+            {
+                unsigned char reala = (unsigned char) (cur[REC_BADGE_OFF] ^ key);
+                unsigned char realb = e_ok
+                    ? (unsigned char) (eb[i * DECK_STRIDE + REC_BADGE_EDIT_OFF] ^ key)
+                    : reala;
+                unsigned char pick = realb;   /* B 优先；B 不可映射时才退回 A */
+                if (!U->have || pick != lreal) {
+                    loc[REC_BADGE_OFF] = (unsigned char) (pick ^ key);
+                    if (!U->have) {
+                        U->have = 1;
+                        logline("fast: local locked (slot %d)", g_cur_slot);
+                    } else {
+                        logline("bsync: deck%d adopt %u (A=%u B=%u)", i, pick,
+                                (unsigned) reala, (unsigned) realb);
+                    }
+                    dirty = 1;
                 }
-            } else if (real != 0 && real != 1 && !quiet && (!U->have || lreal != real)) {
-                loc[REC_BADGE_OFF] = cur[REC_BADGE_OFF];
-                if (!U->have) {
-                    U->have = 1;
-                    logline("fast: local locked (slot %d)", g_cur_slot);
-                }
-                dirty = 1;
             }
         }
 
@@ -2191,18 +2264,31 @@ static int got_res(void *self, void *q) {
        继续还原等于「关了没关掉」。让服务端的值原样生效。 */
     if (ok && g_badge_enabled && SVD_W_OK()) {
         unsigned char *p = (unsigned char *) (sv + DECK_REC_BASE);
-        int fixed = 0;
+        /* 牌子只在「服务器确实把存档写成了默认值」时才补回本地记录。
+           这是唯一有明确调用边界、能分辨「谁写的」的地方：
+             - 调用前后没变      -> 服务器没碰，什么都不做
+             - 变成默认值 0/1    -> 服务器不知道用户的真实选择，补回本地
+             - 变成别的非默认值  -> 服务器记录的就是用户的牌子，认可它
+           轮询（skin_sync）那边一律只读不写，绝不和用户的界面操作抢字节。 */
+        int fixed = 0, adopted = 0;
         for (int i = 0; i < n; i++) {
-            if (loc2[i] == 0) continue;                 /* 本地没有有效牌子 */
             unsigned char now = p[i * DECK_STRIDE + REC_BADGE_OFF];
-            if (now != pre[i]) {
-                if (g_got_trace)
-                    logline("res: deck%d badge %#x -> %#x, restore %#x", i, pre[i], now, loc2[i]);
-                p[i * DECK_STRIDE + REC_BADGE_OFF] = loc2[i];
-                fixed++;
+            if (now == pre[i]) continue;                /* 服务器没碰这一队 */
+            unsigned char key = (unsigned char) ((i * 15 + 0x61) & 0xff);
+            unsigned char real = (unsigned char) (now ^ key);
+            if (real == 0 || real == 1) {
+                if (loc2[i] != 0 && loc2[i] != now) {
+                    p[i * DECK_STRIDE + REC_BADGE_OFF] = loc2[i];
+                    fixed++;
+                }
+            } else if (loc2[i] != now) {
+                /* 服务器记着一个非默认牌子：认它，免得本地缓存一直是旧的 */
+                U->local[i][REC_BADGE_OFF] = now;
+                adopted++;
             }
         }
         if (fixed) logline("res: badge restored %d decks", fixed);
+        if (adopted) logline("res: badge adopted %d decks", adopted);
     }
     return ret;
 }
@@ -2443,6 +2529,7 @@ static void write_status_file(void) {
     fprintf(f, "skin %d\n", g_skin_enabled);
     fprintf(f, "bgm %d\n", g_bgm_enabled);
     fprintf(f, "badge %d\n", g_badge_enabled);
+    fprintf(f, "timerfix %d\n", g_timerfix_enabled);
     fclose(f);
     if (rename(tmp, p) != 0) remove(tmp);
 }
@@ -2469,8 +2556,8 @@ static void load_skin_cfg(void) {
     /* 三个功能开关先攒在局部变量里，等整份文件读完、确认 cfgver 之后再生效。
        这样「文件里没有版本行」的遗留文件不会在解析途中就把开关打开。 */
     int cfg_ver = 0;
-    int v_skin = 0, v_bgm = 0, v_badge = 0;
-    int has_skin = 0, has_bgm = 0, has_badge = 0;
+    int v_skin = 0, v_bgm = 0, v_badge = 0, v_timer = 0;
+    int has_skin = 0, has_bgm = 0, has_badge = 0, has_timer = 0;
     while (fgets(line, sizeof(line), f)) {
         unsigned long off = 0, val = 0;
         int w = 4;
@@ -2547,6 +2634,12 @@ static void load_skin_cfg(void) {
             has_badge = 1;
             continue;
         }
+        /* 计时本防退。与上面三个开关一样受 cfgver 闸门保护。 */
+        if (strncmp(line, "timerfix ", 9) == 0) {
+            v_timer = atoi(line + 9) ? 1 : 0;
+            has_timer = 1;
+            continue;
+        }
         /* badge_ack 只给界面用，探针不解析，这里显式跳过免得误判成 pin */
         if (sscanf(line, "pin %lx %d %lx", &off, &w, &val) == 3) {
             if (n < PIN_MAX) {
@@ -2582,35 +2675,514 @@ static void load_skin_cfg(void) {
             }
             g_badge_enabled = v_badge;
         }
-        if (!has_skin && !has_bgm && !has_badge)
+        if (has_timer) {
+            if (v_timer != g_timerfix_enabled) {
+                logline("cfg: timerfix=%d", v_timer);
+                /* 关掉时把记录清掉，重新打开能再打一遍首条日志 */
+                if (!v_timer) g_timerfix_last_flags = -1;
+            }
+            g_timerfix_enabled = v_timer;
+        }
+        if (!has_skin && !has_bgm && !has_badge && !has_timer)
             logline("cfg: ver=%d but no switch lines, keep defaults", cfg_ver);
     } else {
         /* 遗留文件：强制全关。只在值真的变过时打日志，避免每轮刷屏。 */
-        if (g_skin_enabled || g_bgm_enabled || g_badge_enabled) {
+        if (g_skin_enabled || g_bgm_enabled || g_badge_enabled || g_timerfix_enabled) {
             logline("cfg: legacy file (no cfgver), forcing all switches off "
-                    "(was skin=%d bgm=%d badge=%d)",
-                    g_skin_enabled, g_bgm_enabled, g_badge_enabled);
+                    "(was skin=%d bgm=%d badge=%d timerfix=%d)",
+                    g_skin_enabled, g_bgm_enabled, g_badge_enabled, g_timerfix_enabled);
         }
         g_skin_enabled = 0;
         g_bgm_enabled = 0;
         g_badge_enabled = 0;
+        g_timerfix_enabled = 0;
     }
     /* 一行把「这次重读到底采纳了什么」写清楚。排查时只要 grep 这一行，
        就能分清是文件没变、版本不对、还是开关值没写进去。 */
-    logline("cfg: ver=%d switches skin=%d bgm=%d badge=%d, %d pins",
+    logline("cfg: ver=%d switches skin=%d bgm=%d badge=%d timerfix=%d, %d pins",
             (cfg_ver >= CFG_VER_MIN) ? cfg_ver : 0,
-            g_skin_enabled, g_bgm_enabled, g_badge_enabled, n);
+            g_skin_enabled, g_bgm_enabled, g_badge_enabled, g_timerfix_enabled, n);
     /* 版本 + 三个开关的最终取值落一个状态文件，给界面回显用。
        用四元组做变化判断：只比 cfgver 会漏掉「版本没变但开关被拨动」的情况。 */
     {
         int ver = (cfg_ver >= CFG_VER_MIN) ? cfg_ver : 0;
-        int sig = (ver << 3) | (g_skin_enabled << 2) | (g_bgm_enabled << 1) | g_badge_enabled;
+        int sig = (ver << 4) | (g_skin_enabled << 3) | (g_bgm_enabled << 2)
+                  | (g_badge_enabled << 1) | g_timerfix_enabled;
         if (sig != g_status_sig) {
             g_status_sig = sig;
             g_cfg_ver_applied = ver;
             write_status_file();
         }
     }
+}
+
+/* ================= 盘面读取（自动转珠的地基） =================
+   v23.6.0 真机实测偏移，全部来自「设备运行时 dump 的 dynsym + 反汇编」，
+   不要再引用 work/devdump/out/libpad.runtime.so 里的旧地址（那是别的版本）。
+
+     cGAMEMAIN* 全局槽   = libpad + 0x10e34c8   (getBoardWidth 里 adrp/ldr #0x4c8)
+     cGAMEMAIN + 0x70    = cols (s8)
+     cGAMEMAIN + 0x71    = rows (s8)
+     cGAMEMAIN + 0x88    = impl
+     impl + 0xa3558      = sBLOCK* board[16][16]，行主序，格号 = col + row*16
+     sBLOCK + 0x00       = u8  珠子类型（setBurBlockFlag 用 ldrb）
+     sBLOCK + 0x04       = u32 标记位
+     sBLOCK + 0x12       = u16 类型（_checkFlood 用 ldrh，==6 视作不可消的珠）
+     sBLOCK + 0x14       = s16 flood 计数（消珠判定时被写 0xffff）
+
+   只读，一个字节都不写。 */
+#define GM_SLOT_OFF     0x10e34c8UL
+#define GM_COLS_OFF     0x70
+#define GM_ROWS_OFF     0x71
+#define GM_IMPL_OFF     0x88
+#define IMPL_BOARD_OFF  0xa3558UL
+
+static unsigned long gm_ptr(void) {
+    unsigned long lib = libpad_base();
+    if (!lib) return 0;
+    unsigned long slot = lib + GM_SLOT_OFF;
+    if (!addr_mapped(slot)) return 0;
+    unsigned long gm = *(unsigned long *) slot;
+    if (!gm || !addr_mapped(gm)) return 0;
+    return gm;
+}
+
+/* ============ 计时本防退的实现 ============
+   impl+0xaffa0 是 cGAMEMAIN 内部的状态字节（实测取值）：
+     bit0 = 计时对象已就绪（init 置）
+     bit1 = 已放弃 / 中断续关 / 已通关（loadAbandonData、gamePhaseExecClear 置）
+     bit2 = 后台中（inactive 置）
+     bit5 = 计时暂停（resume 无条件置、loadAbandonData 也置）
+   绘制 _drawTimeAttackTimer 用 `tst w9,#0x22222222`（掩码含 bit1 和 bit5），
+   任一位置位就画字面量 "---.--"，所以这两个位都会让倒计时失效。
+
+   两条触发路径（都实测过）：
+     1) 切后台再回前台 → resume @0x6d08d8 只置 bit5          → 清 bit5 即可
+     2) 杀进程重进、恢复中断关 → loadAbandonData @0x96d6c4 先置 bit1
+        再在 0x96d6d4 置 bit5（两个位一起置）                → 必须两个都清
+   区分依据就是「bit5 是否也置位」：
+     - bit5 置 + bit1 置  → 是 (2) 的恢复续关，清 bit1 和 bit5
+     - bit5 置 + bit1 清  → 是 (1) 的 resume，只清 bit5
+     - bit5 清            → 什么都不做（正常通关时 gamePhaseExecClear 单独置的
+                            bit1 属于正常流程，绝不去碰） */
+#define IMPL_TIMER_FLAGS_OFF 0xaffa0UL
+#define TIMER_FLAG_ABANDONED 0x02      /* bit1 */
+#define TIMER_FLAG_PAUSED    0x20      /* bit5 */
+#define TIMER_FLAG_ALERTED   0x40      /* bit6 */
+
+/* bit6（0x40）=「强制退出弹窗已处理过」的闩锁位。
+   全库判据统一是 `(flags & 0x60) == 0x20`（9 处）：
+     0x6b9168 calcPlayer+0x448      0x943634/0x94367c/0x9437ac gamePhaseMove
+     0x95e76c gamePhaseExecClear    0x9605b0/0x960930 gamePhaseExecVsClear
+     （另 2 处 mhCardSelect / _multiBattleMovePractice 与计时无关）
+   即：「bit5 置 + bit6 清」→ 弹强制退出窗；bit6 置 → 不弹。
+   而 bit6 在全库范围内 **没有任何一处清除**（扫 and/bic #0xffffffbf 共 60+
+   命中，逐条核对均不作用于本字节），所以它是天然的一次性闩锁。
+   同时 _drawTimeAttackTimer 的判据是 `tst w9,#0x22222222`（不含 bit6），
+   置 bit6 不会让倒计时变成 "---.--"，倒计时照常走。
+   → 所以「清 bit5 + 置 bit6」= 计时继续且不再弹窗。 */
+
+/* 读当前 flags 字节；取不到返回 -1。 */
+static int timer_flags_read(unsigned long *impl_out) {
+    unsigned long gm = gm_ptr();
+    if (!gm) return -1;
+    unsigned long impl = addr_mapped(gm + GM_IMPL_OFF)
+                         ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+    impl &= MASK_TAG;
+    if (!impl || !addr_mapped(impl)) return -1;
+    unsigned long a = impl + IMPL_TIMER_FLAGS_OFF;
+    if (!addr_mapped(a)) return -1;
+    if (impl_out) *impl_out = impl;
+    return (int) *(unsigned char *) a;
+}
+
+/* 每轮调用（50ms 一次）。只在开关打开、且确实需要时写这 1 个字节。
+   写之前重读一次，避免和游戏自己的 resume/loadAbandonData 抢写。 */
+static void timer_apply(void) {
+    if (!g_timerfix_enabled) return;
+    unsigned long impl = 0;
+    int fl = timer_flags_read(&impl);
+    if (fl < 0) return;                      /* 还没进关卡 / 对象未就绪 */
+    if (fl != g_timerfix_last_flags) {
+        logline("timerfix: flags=%#x paused=%d abandoned=%d alerted=%d",
+                fl, (fl & TIMER_FLAG_PAUSED) ? 1 : 0, (fl & TIMER_FLAG_ABANDONED) ? 1 : 0,
+                (fl & TIMER_FLAG_ALERTED) ? 1 : 0);
+        g_timerfix_last_flags = fl;
+    }
+    /* bit5 没置位 → 不是上面两条路径，一个字都不写。
+       正常通关时 gamePhaseExecClear 会单独置 bit1，那属于游戏自己的流程。 */
+    if (!(fl & TIMER_FLAG_PAUSED)) return;
+    unsigned char *p = (unsigned char *) (impl + IMPL_TIMER_FLAGS_OFF);
+    unsigned char now = *p;
+    if (!(now & TIMER_FLAG_PAUSED)) return;  /* 已被别人改掉，重下一轮 */
+    unsigned char want = (unsigned char) (now & (unsigned char) ~TIMER_FLAG_PAUSED);
+    /* bit1 只在 bit5 同时置位时才清（= loadAbandonData 的恢复续关路径）。
+       resume 路径本来就没有 bit1，这里不会误伤。 */
+    if (now & TIMER_FLAG_ABANDONED) want = (unsigned char) (want & (unsigned char) ~TIMER_FLAG_ABANDONED);
+    /* 顺手置上「弹窗已处理」闩锁位，让 gamePhaseMove / ExecClear / ExecVsClear
+       那些 `(flags&0x60)==0x20` 的判据全部落空，不再弹强制退出窗。
+       已在则不变。 */
+    want = (unsigned char) (want | TIMER_FLAG_ALERTED);
+    *p = want;
+    logline("timerfix: cleared %#x -> %#x", now, (unsigned) *p);
+    g_timerfix_last_flags = (int) *p;
+}
+
+static void board_cmd(void) {
+    unsigned long gm = gm_ptr();
+    if (!gm) { logline("board: no cGAMEMAIN (not in game scene yet?)"); return; }
+    int cols = (int) *(signed char *) (gm + GM_COLS_OFF);
+    int rows = (int) *(signed char *) (gm + GM_ROWS_OFF);
+    unsigned long impl = addr_mapped(gm + GM_IMPL_OFF) ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+    logline("board: gm=%#lx impl=%#lx cols=%d rows=%d", gm, impl, cols, rows);
+    if (!impl || !addr_mapped(impl + IMPL_BOARD_OFF)) { logline("board: impl/board unmapped"); return; }
+    if (cols < 1 || cols > 16 || rows < 1 || rows > 16) { logline("board: geometry rejected"); return; }
+    unsigned long arr = impl + IMPL_BOARD_OFF;
+    char line[256];
+    for (int r = 0; r < rows; r++) {
+        int n = 0;
+        for (int c = 0; c < cols; c++) {
+            unsigned long slot = arr + (unsigned long) (c + (r << 4)) * 8UL;
+            unsigned long b = addr_mapped(slot) ? *(unsigned long *) slot : 0;
+            int t00 = -1, t12 = -1, f14 = -1;
+            unsigned int fl = 0;
+            if (b && addr_mapped(b)) {
+                t00 = (int) *(unsigned char *) b;
+                t12 = (int) *(unsigned short *) (b + 0x12);
+                f14 = (int) *(short *) (b + 0x14);
+                fl = *(unsigned int *) (b + 4);
+            }
+            n += snprintf(line + n, sizeof(line) - (size_t) n, " %d:%-3d %d/%d/%04x ", 
+                          c, t00, t12, f14, fl & 0xffffu);
+        }
+        logline("board r%d |%s", r, line);
+    }
+}
+
+/* 每格在屏幕上的像素坐标（sBLOCK+0x1c 是 x，+0x1e 是 y，calcBlocks 每帧算好）。
+   注入触摸时必须用这个坐标系，游戏内部 getNearestBlock 就是拿它比对的。 */
+static void board_xy_cmd(void) {
+    unsigned long gm = gm_ptr();
+    if (!gm) { logline("xy: no cGAMEMAIN"); return; }
+    int cols = (int) *(signed char *) (gm + GM_COLS_OFF);
+    int rows = (int) *(signed char *) (gm + GM_ROWS_OFF);
+    unsigned long impl = addr_mapped(gm + GM_IMPL_OFF) ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+    if (!impl || cols < 1 || cols > 16 || rows < 1 || rows > 16) { logline("xy: bad geometry"); return; }
+    unsigned long arr = impl + IMPL_BOARD_OFF;
+    for (int r = 0; r < rows; r++) {
+        char line[256];
+        int n = 0;
+        for (int c = 0; c < cols; c++) {
+            unsigned long slot = arr + (unsigned long) (c + (r << 4)) * 8UL;
+            unsigned long b = addr_mapped(slot) ? *(unsigned long *) slot : 0;
+            int x = -1, y = -1;
+            if (b && addr_mapped(b)) {
+                x = (int) *(short *) (b + 0x1c);
+                y = (int) *(short *) (b + 0x1e);
+            }
+            n += snprintf(line + n, sizeof(line) - (size_t) n, " %d:%d,%d", c, x, y);
+        }
+        logline("xy r%d |%s", r, line);
+    }
+}
+
+/* ================= 触摸注入（走游戏自己的输入管线，不碰 /dev/input） =================
+   游戏 Java 层声明的 native 方法：
+     Java_jp_gungho_pad_AppDelegate_onTouchEvent(JNIEnv*, jobject,
+         float x, float y, int i, int i2, int i3, int i4, long j, int i5)
+   反汇编确认函数体根本不用 env/this（x0/x1 早被覆盖），所以可以直接按 C 函数指针调用，
+   不需要任何 JNI 环境，也不需要反射。参数含义（来自 Java 包装）：
+     x,y   = 像素坐标（函数内部自己归一化到 1024x2048 空间）
+     i     = pointerIndex，单指恒 0
+     i2    = 0
+     i3    = pointerCount，单指恒 1
+     i4    = MotionEvent action 原值（0=DOWN, 2=MOVE, 1=UP）
+     j     = eventTime（毫秒）
+     i5    = action & 255
+   走的是 0x104b2d0/0x104b2e0/0x104b2f0 这几个 pad 输入入口，等价于真手指。 */
+typedef void (*touch_fn_t)(void *, void *, float, float, int, int, int, int, long long, int);
+
+static touch_fn_t g_touch_fn;
+
+/* libpad 是 System.loadLibrary 加载的（RTLD_LOCAL），dlopen/dlsym 拿不到，
+   但它的 p_vaddr==0，所以 libpad_base()+st_value 就是真实地址。
+   v23.6.0: Java_jp_gungho_pad_AppDelegate_onTouchEvent = 0x553b40（0x274 字节）。
+   取到后校验开头 4 字节必须是 prologue，不对就拒绝调用，避免跳飞打死游戏。 */
+#define TOUCH_FN_OFF 0x553b40UL
+
+static touch_fn_t touch_fn(void) {
+    if (g_touch_fn) return g_touch_fn;
+    unsigned long base = libpad_base();
+    if (!base) { logline("touch: libpad not loaded"); return NULL; }
+    unsigned long a = base + TOUCH_FN_OFF;
+    if (!addr_mapped(a)) { logline("touch: %#lx unmapped", a); return NULL; }
+    static const unsigned char want[8] = {0xff, 0x43, 0x02, 0xd1, 0xfd, 0x7b, 0x03, 0xa9};
+    if (memcmp((void *) a, want, sizeof(want)) != 0) {
+        logline("touch: prologue mismatch at %#lx: %02x %02x %02x %02x %02x %02x %02x %02x",
+                a, ((unsigned char *) a)[0], ((unsigned char *) a)[1], ((unsigned char *) a)[2],
+                ((unsigned char *) a)[3], ((unsigned char *) a)[4], ((unsigned char *) a)[5],
+                ((unsigned char *) a)[6], ((unsigned char *) a)[7]);
+        return NULL;
+    }
+    g_touch_fn = (touch_fn_t) a;
+    logline("touch: fn=%#lx", a);
+    return g_touch_fn;
+}
+
+static void touch_send(float x, float y, int action) {
+    touch_fn_t f = touch_fn();
+    if (!f) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long long t = (long long) ts.tv_sec * 1000LL + (long long) (ts.tv_nsec / 1000000L);
+    f(NULL, NULL, x, y, 0, 0, 1, action, t, action & 255);
+}
+
+static void msleep(int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long) (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+/* tap <x> <y>：按下即抬起 */
+static void touch_tap_cmd(float x, float y) {
+    if (!touch_fn()) { logline("tap: no touch symbol"); return; }
+    logline("tap %.1f,%.1f", x, y);
+    touch_send(x, y, 0);
+    msleep(60);
+    touch_send(x, y, 1);
+}
+
+/* drag <x1> <y1> <x2> <y2> [steps]：直线拖动（用于验证注入通路） */
+static void touch_drag_cmd(float x1, float y1, float x2, float y2, int steps) {
+    if (!touch_fn()) { logline("drag: no touch symbol"); return; }
+    if (steps < 1) steps = 1;
+    if (steps > 200) steps = 200;
+    logline("drag %.1f,%.1f -> %.1f,%.1f steps=%d", x1, y1, x2, y2, steps);
+    touch_send(x1, y1, 0);
+    for (int i = 1; i <= steps; i++) {
+        float t = (float) i / (float) steps;
+        touch_send(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, 2);
+        msleep(12);
+    }
+    msleep(40);
+    touch_send(x2, y2, 1);
+}
+
+
+/* ================= 求解器 =================
+   盘面 6x5，r=0 是屏幕最下面一行（和 board[0] 一致）。
+   珠子类型只用 sBLOCK+0x00（0火 1水 2木 3光 4暗 5心），特殊珠 6+ 当「不会消」处理。
+   模拟规则：
+     - 拖动时抓着的珠子逐格交换（和游戏里一样），松开才判定，所以只在路径终点判一次
+     - 连线：同色上下左右连通且 >=3 即消，消完重力下落，顶上新珠未知（记 -1，永不参与连线）
+     - 级联最多算 16 轮 */
+#define SB_ROWS 5
+#define SB_COLS 6
+#define SB_CELLS (SB_ROWS * SB_COLS)
+
+static int g_sb[SB_ROWS][SB_COLS];
+
+static int sb_read(void) {
+    unsigned long gm = gm_ptr();
+    if (!gm) return 0;
+    int cols = (int) *(signed char *) (gm + GM_COLS_OFF);
+    int rows = (int) *(signed char *) (gm + GM_ROWS_OFF);
+    unsigned long impl = addr_mapped(gm + GM_IMPL_OFF) ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+    if (!impl || cols != SB_COLS || rows != SB_ROWS) return 0;
+    unsigned long arr = (impl & 0x00ffffffffffffffUL) + IMPL_BOARD_OFF;
+    if (!addr_mapped(arr)) return 0;
+    for (int r = 0; r < SB_ROWS; r++) {
+        for (int c = 0; c < SB_COLS; c++) {
+            unsigned long slot = arr + (unsigned long) (c + (r << 4)) * 8UL;
+            unsigned long b = addr_mapped(slot) ? *(unsigned long *) slot : 0;
+            b &= 0x00ffffffffffffffUL;
+            g_sb[r][c] = (b && addr_mapped(b)) ? (int) *(unsigned char *) b : -1;
+        }
+    }
+    return 1;
+}
+
+/* 拷贝一份算级联：返回总 combo 数。不修改入参。 */
+static int sb_eval(const int src[SB_ROWS][SB_COLS]) {
+    int b[SB_ROWS][SB_COLS];
+    memcpy(b, src, sizeof(b));
+    int total = 0;
+    for (int iter = 0; iter < 16; iter++) {
+        int mark[SB_ROWS][SB_COLS];
+        memset(mark, 0, sizeof(mark));
+        int cleared_any = 0;
+        for (int r = 0; r < SB_ROWS; r++) {
+            for (int c = 0; c < SB_COLS; c++) {
+                int type = b[r][c];
+                if (type < 0 || type > 5 || mark[r][c]) continue;
+                int q[SB_CELLS], qn = 0, cell[SB_CELLS], cn = 0;
+                q[qn++] = r * SB_COLS + c;
+                mark[r][c] = 1;
+                for (int h = 0; h < qn; h++) {
+                    int cur = q[h];
+                    cell[cn++] = cur;
+                    int cr = cur / SB_COLS, cc = cur % SB_COLS;
+                    static const int dr[4] = {1, -1, 0, 0};
+                    static const int dc[4] = {0, 0, 1, -1};
+                    for (int k = 0; k < 4; k++) {
+                        int nr = cr + dr[k], nc = cc + dc[k];
+                        if (nr < 0 || nr >= SB_ROWS || nc < 0 || nc >= SB_COLS) continue;
+                        if (mark[nr][nc] || b[nr][nc] != type) continue;
+                        mark[nr][nc] = 1;
+                        q[qn++] = nr * SB_COLS + nc;
+                    }
+                }
+                if (cn >= 3) {
+                    total++;
+                    cleared_any = 1;
+                    for (int i = 0; i < cn; i++) {
+                        int cur = cell[i];
+                        b[cur / SB_COLS][cur % SB_COLS] = -2;   /* -2 = 已消 */
+                    }
+                }
+            }
+        }
+        if (!cleared_any) break;
+        /* 重力：每列把非 -2 的珠子压到底部，顶上补 -1（新珠未知） */
+        for (int c = 0; c < SB_COLS; c++) {
+            int col[SB_ROWS], n = 0;
+            for (int r = SB_ROWS - 1; r >= 0; r--) {
+                if (b[r][c] != -2) col[n++] = b[r][c];
+            }
+            for (int r = 0; r < SB_ROWS; r++) b[r][c] = -1;
+            /* col[0] 是最下面那颗，直接按序放回底部；顶上剩余格保持 -1（新珠未知） */
+            for (int i = 0; i < n; i++) b[i][c] = col[i];
+        }
+    }
+    return total;
+}
+
+static int g_path_best[24];
+static int g_path_best_len;
+static int g_path_best_combo;
+static int g_path_cur[24];
+static unsigned char g_visited[SB_ROWS][SB_COLS];
+static int g_path_start;
+static int g_path_best_start;
+
+static void sb_dfs(int b[SB_ROWS][SB_COLS], int cur, int depth, int maxdepth) {
+    if (depth >= 1) {
+        int combo = sb_eval((const int (*)[SB_COLS]) b);
+        /* 同等 combo 取更短的路径（少走一步少一次误触机会） */
+        if (combo > g_path_best_combo || (combo == g_path_best_combo && depth < g_path_best_len)) {
+            g_path_best_combo = combo;
+            g_path_best_len = depth;
+            g_path_best_start = g_path_start;
+            memcpy(g_path_best, g_path_cur, sizeof(int) * (size_t) depth);
+        }
+    }
+    if (depth >= maxdepth) return;
+    int r = cur / SB_COLS, c = cur % SB_COLS;
+    static const int dr[4] = {1, -1, 0, 0};
+    static const int dc[4] = {0, 0, 1, -1};
+    for (int k = 0; k < 4; k++) {
+        int nr = r + dr[k], nc = c + dc[k];
+        if (nr < 0 || nr >= SB_ROWS || nc < 0 || nc >= SB_COLS) continue;
+        if (g_visited[nr][nc]) continue;
+        int tmp = b[nr][nc];
+        b[nr][nc] = b[r][c];
+        b[r][c] = tmp;
+        g_visited[nr][nc] = 1;
+        g_path_cur[depth] = nr * SB_COLS + nc;
+        sb_dfs(b, nr * SB_COLS + nc, depth + 1, maxdepth);
+        g_visited[nr][nc] = 0;
+        b[r][c] = b[nr][nc];
+        b[nr][nc] = tmp;
+    }
+}
+
+/* 纯坐标：格子 -> 屏幕像素。
+   依据：sBLOCK+0x1c/+0x1e 是 640x1251 设计空间的格子中心，
+   实测映射 px = 2.2381*dev_x + 9.43、py = 2.2214*dev_y + 288.3（真机 drag 验证过）。 */
+static void cell_px(int r, int c, float *px, float *py) {
+    unsigned long gm = gm_ptr();
+    float x = 20.0f + 235.0f * ((float) c + 0.5f);
+    float y = 3070.0f - 233.0f * ((float) r + 0.5f);
+    if (gm) {
+        unsigned long impl = addr_mapped(gm + GM_IMPL_OFF) ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+        unsigned long arr = (impl & 0x00ffffffffffffffUL) + IMPL_BOARD_OFF;
+        unsigned long slot = arr + (unsigned long) (c + (r << 4)) * 8UL;
+        unsigned long b = addr_mapped(slot) ? *(unsigned long *) slot : 0;
+        b &= 0x00ffffffffffffffUL;
+        if (b && addr_mapped(b)) {
+            int dx = (int) *(short *) (b + 0x1c);
+            int dy = (int) *(short *) (b + 0x1e);
+            if (dx > 0 && dy > 0) {
+                x = 2.2381f * (float) dx + 9.43f;
+                y = 2.2214f * (float) dy + 288.3f;
+            }
+        }
+    }
+    *px = x;
+    *py = y;
+}
+
+static int g_solve_depth = 8;
+
+static void solve_cmd(int do_play) {
+    if (!sb_read()) { logline("solve: board unreadable"); return; }
+    char line[512];
+    int n = 0;
+    n += snprintf(line + n, sizeof(line) - (size_t) n, "solve: board");
+    for (int r = 0; r < SB_ROWS; r++) {
+        n += snprintf(line + n, sizeof(line) - (size_t) n, " |");
+        for (int c = 0; c < SB_COLS; c++) n += snprintf(line + n, sizeof(line) - (size_t) n, "%d", g_sb[r][c]);
+    }
+    logline("%s", line);
+
+    int b[SB_ROWS][SB_COLS];
+    memcpy(b, g_sb, sizeof(b));
+    g_path_best_combo = -1;
+    g_path_best_len = 0;
+    memset(g_visited, 0, sizeof(g_visited));
+    for (int r = 0; r < SB_ROWS; r++) {
+        for (int c = 0; c < SB_COLS; c++) {
+            memcpy(b, g_sb, sizeof(b));
+            g_path_start = r * SB_COLS + c;
+            g_visited[r][c] = 1;
+            sb_dfs(b, r * SB_COLS + c, 0, g_solve_depth);
+            g_visited[r][c] = 0;
+        }
+    }
+    if (g_path_best_combo <= 0) { logline("solve: no move found (combo=%d)", g_path_best_combo); return; }
+
+    /* 把最优路径还原成起点 + 逐格 */
+    n = 0;
+    n += snprintf(line + n, sizeof(line) - (size_t) n, "solve: combo=%d len=%d start r%dc%d path",
+                  g_path_best_combo, g_path_best_len, g_path_best_start / SB_COLS, g_path_best_start % SB_COLS);
+    for (int i = 0; i < g_path_best_len; i++) {
+        n += snprintf(line + n, sizeof(line) - (size_t) n, " r%dc%d", g_path_best[i] / SB_COLS, g_path_best[i] % SB_COLS);
+    }
+    logline("%s", line);
+
+    if (!do_play) return;
+    touch_fn_t f = touch_fn();
+    if (!f) { logline("solve: touch unavailable"); return; }
+    /* 起点 = 路径第一个格子之前的位置：从起点格开始拖，所以要先把手指落在起点格 */
+
+    float px = 0, py = 0;
+    logline("solve: play start");
+    int cur = g_path_best_start;
+    cell_px(cur / SB_COLS, cur % SB_COLS, &px, &py);
+    touch_send(px, py, 0);
+    msleep(30);
+    for (int i = 0; i < g_path_best_len; i++) {
+        int cell = g_path_best[i];
+        cell_px(cell / SB_COLS, cell % SB_COLS, &px, &py);
+        touch_send(px, py, 2);
+        msleep(16);
+    }
+    cell_px(g_path_best[g_path_best_len - 1] / SB_COLS, g_path_best[g_path_best_len - 1] % SB_COLS, &px, &py);
+    msleep(30);
+    touch_send(px, py, 1);
+    logline("solve: play done");
 }
 
 static void *worker(void *arg) {
@@ -2620,6 +3192,17 @@ static void *worker(void *arg) {
     logline("worker started, watching %s", cmd_path());
     logline("build: target v23.6.0 (libpad 30735496) RELEASE - svd_write=%d net_write=%d",
             g_write_svd, g_write_net);
+
+    /* 启动时先「吞掉」cmd 文件里残留的上一条命令：否则上次留下的诊断命令
+       （bdwatch/bdall 之类）会在新进程一启动就被执行一遍，那时 savedata
+       还没加载，读存档相关的命令就会崩（曾崩在 fault addr 0x52f41b）。 */
+    {
+        char *stale = read_cmd();
+        if (stale && stale[0]) {
+            snprintf(last, sizeof(last), "%s", stale);
+            logline("worker: ignoring stale cmd '%s'", last);
+        }
+    }
 
     for (;;) {
         /* 注入会命中多个进程；只有真正加载了 libpad 的那个才处理命令，
@@ -2722,6 +3305,31 @@ static void *worker(void *arg) {
                         }
                     }
                 }
+            } else if (strncmp(cmd, "impl ", 5) == 0) {
+                /* impl 相对读（只读，不写任何字节）。impl 是堆对象，不是 lib 相对
+                   偏移，必须经 gm_ptr() + GM_IMPL_OFF 取，并剥掉 MTE tag。 */
+                unsigned long off = 0, len = 8;
+                if (sscanf(cmd + 5, "%lx %lx", &off, &len) >= 1) {
+                    unsigned long gm = gm_ptr();
+                    if (!gm) logline("impl: no cGAMEMAIN");
+                    else {
+                        unsigned long impl = addr_mapped(gm + GM_IMPL_OFF)
+                                             ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+                        impl &= 0x00ffffffffffffffUL;   /* MTE tag 在高 8 位 */
+                        if (!impl || !addr_mapped(impl)) logline("impl: impl unmapped (gm=%#lx)", gm);
+                        else {
+                            if (len > 64) len = 64;
+                            unsigned long a = impl + off;
+                            if (!addr_mapped(a) || !addr_mapped(a + len - 1)) logline("impl: off=%#lx unmapped", off);
+                            else {
+                                char b[200]; int n = 0;
+                                for (unsigned long i = 0; i < len; i++)
+                                    n += snprintf(b + n, sizeof(b) - (size_t) n, "%02x", ((unsigned char *) a)[i]);
+                                logline("impl: impl=%#lx off=%#lx [%lu] %s", impl, off, len, b);
+                            }
+                        }
+                    }
+                }
             } else if (strncmp(cmd, "w16 ", 4) == 0) {
                 unsigned long off = 0, val = 0;
                 if (sscanf(cmd + 4, "%lx %lx", &off, &val) == 2) mem_write_cmd(2, off, val);
@@ -2801,6 +3409,43 @@ static void *worker(void *arg) {
                 logline("watch: armed %d decks", DECK_COUNT);
                 fast_watch_start();
 
+            } else if (strcmp(cmd, "bdall") == 0) {
+                /* 只读诊断：一次列出 A（存档）、B（UI 编辑缓冲）、本地缓存的牌子。
+                   用来回答「用户点了之后到底哪个数组先变」这个唯一还没实测的问题。 */
+                unsigned long sv = savedata_ptr();
+                if (!sv) { logline("bdall: no savedata"); }
+                else if (!addr_mapped(sv + DECK_REC_BASE) || !addr_mapped(sv + EDIT_REC_BASE)) {
+                    logline("bdall: unmapped A=%d B=%d",
+                            addr_mapped(sv + DECK_REC_BASE), addr_mapped(sv + EDIT_REC_BASE));
+                } else {
+                    int n = deck_limit(sv);
+                    unsigned char *a = (unsigned char *) (sv + DECK_REC_BASE);
+                    unsigned char *b = (unsigned char *) (sv + EDIT_REC_BASE);
+                    struct user_slot *U = cur_user();
+                    int bidx = (int) *(short *) (b + 4);   /* B+4 = 当前编辑的队伍索引 */
+                    logline("bdall: n=%d editIdx=%d have=%d", n, bidx, U ? U->have : -1);
+                    for (int i = 0; i < DECK_COUNT && i < n; i++) {
+                        unsigned char key  = (unsigned char) ((i * 15 + 0x61) & 0xff);
+                        unsigned char rawa = a[i * DECK_STRIDE + REC_BADGE_OFF];
+                        unsigned char rawb = b[i * DECK_STRIDE + REC_BADGE_EDIT_OFF];
+                        unsigned char loc  = U ? U->local[i][REC_BADGE_OFF] : 0;
+                        logline("bdall: %2d A=%3u(%3u) B=%3u(%3u) loc=%3u(%3u)%s",
+                                i + 1, rawa, (unsigned) (rawa ^ key),
+                                rawb, (unsigned) (rawb ^ key),
+                                loc, (unsigned) (loc ^ key),
+                                (i == bidx) ? " <-editing" : "");
+                    }
+                }
+            } else if (strcmp(cmd, "bdwatch") == 0) {
+                /* 5ms 采样同时盯 A/B 两处牌子字节，看用户点击后谁先变。 */
+                g_watch_ms0 = watch_now_ms();
+                for (int i = 0; i < DECK_COUNT; i++) {
+                    watch_add(DECK_REC_BASE + (unsigned long) i * DECK_STRIDE + REC_BADGE_OFF, 1);
+                    watch_add(EDIT_REC_BASE + (unsigned long) i * DECK_STRIDE + REC_BADGE_EDIT_OFF, 1);
+                }
+                logline("watch: bdwatch armed (A+B, %d decks)", DECK_COUNT);
+                fast_watch_start();
+
             } else if (strcmp(cmd, "fast") == 0) {
                 qd_set(1);
                 qd_report();
@@ -2878,6 +3523,38 @@ static void *worker(void *arg) {
                 } else {
                     logline("new: usage new <0|1|2>");
                 }
+            } else if (strcmp(cmd, "board") == 0) {
+                board_cmd();
+            } else if (strcmp(cmd, "gm") == 0) {
+                unsigned long gm = gm_ptr();
+                if (!gm) logline("gm: not found (slot=%#lx)", (unsigned long) (libpad_base() + GM_SLOT_OFF));
+                else logline("gm: %#lx cols=%d rows=%d impl=%#lx",
+                             gm, (int) *(signed char *) (gm + 0x70), (int) *(signed char *) (gm + 0x71),
+                             *(unsigned long *) (gm + 0x88));
+            } else if (strcmp(cmd, "solve") == 0) {
+                solve_cmd(0);
+            } else if (strcmp(cmd, "play") == 0) {
+                solve_cmd(1);
+            } else if (strncmp(cmd, "depth ", 6) == 0) {
+                int d = 0;
+                if (sscanf(cmd + 6, "%d", &d) == 1 && d >= 1 && d <= 12) {
+                    g_solve_depth = d;
+                    logline("depth: %d", d);
+                } else {
+                    logline("depth: usage depth <1..12>");
+                }
+            } else if (strcmp(cmd, "xy") == 0) {
+                board_xy_cmd();
+            } else if (strncmp(cmd, "tap ", 4) == 0) {
+                float x = 0, y = 0;
+                if (sscanf(cmd + 4, "%f %f", &x, &y) == 2) touch_tap_cmd(x, y);
+                else logline("tap: usage tap <x> <y>");
+            } else if (strncmp(cmd, "drag ", 5) == 0) {
+                float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+                int steps = 20;
+                int got = sscanf(cmd + 5, "%f %f %f %f %d", &x1, &y1, &x2, &y2, &steps);
+                if (got >= 4) touch_drag_cmd(x1, y1, x2, y2, steps);
+                else logline("drag: usage drag <x1> <y1> <x2> <y2> [steps]");
             } else if (strcmp(cmd, "clear") == 0) {
                 snapshot_free(&g_s1);
                 snapshot_free(&g_s2);
@@ -2911,6 +3588,7 @@ static void *worker(void *arg) {
         }
         pin_apply();
         skin_apply();
+        timer_apply();
         if (g_trigger == 1) sta_watch();
         {
             /* 每 5 秒打一行状态，方便用户「一眼看出」当前探针认为每队该是什么皮肤 */

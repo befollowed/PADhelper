@@ -180,6 +180,7 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                     onSkin = vm::setSkin,
                     onBgm = vm::setBgm,
                     onBadge = vm::onBadgeToggle,
+                    onTimerFix = vm::setTimerFix,
                 )
                 AppearanceCard(
                     backdrop = backdrop,
@@ -218,6 +219,7 @@ private fun FeatureCard(
     onSkin: (Boolean) -> Unit,
     onBgm: (Boolean) -> Unit,
     onBadge: (Boolean) -> Unit,
+    onTimerFix: (Boolean) -> Unit,
 ) {
     GlassCard(backdrop = backdrop, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp)) {
@@ -247,6 +249,14 @@ private fun FeatureCard(
                 enabled = enabled,
                 warning = true,
                 warningIcon = Icons.Filled.Warning,
+            )
+            Spacer(Modifier.height(12.dp))
+            FeatureRow(
+                title = "限时本防退",
+                description = "限时关卡切后台再回来，倒计时继续走，可继续游戏",
+                checked = state.timerfix,
+                onCheckedChange = onTimerFix,
+                enabled = enabled,
             )
         }
     }

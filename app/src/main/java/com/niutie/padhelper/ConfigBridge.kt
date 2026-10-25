@@ -103,6 +103,7 @@ class ConfigBridge(context: Context) {
         skin = local.getBoolean(KEY_SKIN, false),
         bgm = local.getBoolean(KEY_BGM, false),
         badge = local.getBoolean(KEY_BADGE, false),
+        timerfix = local.getBoolean(KEY_TIMERFIX, false),
         // 只有「确认过风险、且版本对得上」才算已接受。
         // v2.4 之前没有版本号这一说，那些 ack 一律作废 —— 用户上次是在
         // v2.1 的实验性版本里点的「接受」，不代表他知道现在这版也有风险。
@@ -116,6 +117,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_SKIN, local.getBoolean(KEY_SKIN, false))
             .putBoolean(KEY_BGM, local.getBoolean(KEY_BGM, false))
             .putBoolean(KEY_BADGE, local.getBoolean(KEY_BADGE, false))
+            .putBoolean(KEY_TIMERFIX, local.getBoolean(KEY_TIMERFIX, false))
             .putBoolean(KEY_BADGE_ACK, ack)
             .putInt(KEY_ACK_VER, if (ack) ACK_VER else 0)
             .apply()
@@ -129,6 +131,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_SKIN, state.skin)
             .putBoolean(KEY_BGM, state.bgm)
             .putBoolean(KEY_BADGE, state.badge)
+            .putBoolean(KEY_TIMERFIX, state.timerfix)
             .putBoolean(KEY_BADGE_ACK, state.badgeAck)
             .putInt(KEY_ACK_VER, if (state.badgeAck) ACK_VER else 0)
             .commit()
@@ -158,6 +161,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_SKIN, rp.getBoolean(KEY_SKIN, false))
             .putBoolean(KEY_BGM, rp.getBoolean(KEY_BGM, false))
             .putBoolean(KEY_BADGE, rp.getBoolean(KEY_BADGE, false))
+            .putBoolean(KEY_TIMERFIX, rp.getBoolean(KEY_TIMERFIX, false))
             .putBoolean(KEY_BADGE_ACK, ack)
             .putInt(KEY_ACK_VER, if (ack) ACK_VER else 0)
             .commit()
@@ -171,6 +175,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_SKIN, state.skin)
             .putBoolean(KEY_BGM, state.bgm)
             .putBoolean(KEY_BADGE, state.badge)
+            .putBoolean(KEY_TIMERFIX, state.timerfix)
             .putBoolean(KEY_BADGE_ACK, state.badgeAck)
             .putInt(KEY_ACK_VER, if (state.badgeAck) ACK_VER else 0)
             .apply()
@@ -243,6 +248,7 @@ class ConfigBridge(context: Context) {
         const val KEY_SKIN = "skin"
         const val KEY_BGM = "bgm"
         const val KEY_BADGE = "badge"
+        const val KEY_TIMERFIX = "timerfix"
         const val KEY_BADGE_ACK = "badge_ack"
 
         /**

@@ -88,6 +88,12 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setBgm(enabled: Boolean) = commit(_state.value.copy(bgm = enabled))
 
+    /**
+     * 计时本防退。没有风险提示：它只清游戏自己的「计时暂停」标志位，
+     * 不改数值、不改代码，也不影响计分。
+     */
+    fun setTimerFix(enabled: Boolean) = commit(_state.value.copy(timerfix = enabled))
+
     fun setShowIcon(show: Boolean) {
         _showIcon.value = show
         LauncherIcon.apply(getApplication<Application>(), show)

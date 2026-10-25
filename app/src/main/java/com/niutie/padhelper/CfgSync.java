@@ -32,9 +32,11 @@ final class CfgSync {
     static final String KEY_SKIN = "skin";
     static final String KEY_BGM = "bgm";
     static final String KEY_BADGE = "badge";
+    static final String KEY_TIMERFIX = "timerfix";
     static final String KEY_BADGE_ACK = "badge_ack";
 
-    private static final String[] MANAGED = {KEY_SKIN, KEY_BGM, KEY_BADGE, KEY_BADGE_ACK};
+    private static final String[] MANAGED = {
+            KEY_SKIN, KEY_BGM, KEY_BADGE, KEY_TIMERFIX, KEY_BADGE_ACK};
 
     /**
      * skin.cfg 的格式版本。探针侧 {@code CFG_VER_MIN} 必须与它一致。
@@ -95,18 +97,19 @@ final class CfgSync {
         String skin = prefs.getBoolean(KEY_SKIN, false) ? "1" : "0";
         String bgm = prefs.getBoolean(KEY_BGM, false) ? "1" : "0";
         String badge = prefs.getBoolean(KEY_BADGE, false) ? "1" : "0";
+        String timerfix = prefs.getBoolean(KEY_TIMERFIX, false) ? "1" : "0";
         String ack = prefs.getBoolean(KEY_BADGE_ACK, false) ? "1" : "0";
 
-        String body = skin + "|" + bgm + "|" + badge + "|" + ack;
+        String body = skin + "|" + bgm + "|" + badge + "|" + timerfix + "|" + ack;
         boolean wrote = false;
         if (!body.equals(lastWritten)) {
             try {
-                writeCfg(skin, bgm, badge, ack);
+                writeCfg(skin, bgm, badge, timerfix, ack);
                 lastWritten = body;
                 wrote = true;
                 module.log(Log.INFO, PadHelperModule.TAG,
                         "cfg: skin=" + skin + " bgm=" + bgm + " badge=" + badge
-                                + " ack=" + ack + " -> " + cfgFile);
+                                + " timerfix=" + timerfix + " ack=" + ack + " -> " + cfgFile);
             } catch (Throwable t) {
                 module.log(Log.ERROR, PadHelperModule.TAG, "写 skin.cfg 失败: " + t);
             }
@@ -185,7 +188,8 @@ final class CfgSync {
         }
     }
 
-    private void writeCfg(String skin, String bgm, String badge, String ack) throws IOException {
+    private void writeCfg(String skin, String bgm, String badge, String timerfix, String ack)
+            throws IOException {
         List<String> lines = new ArrayList<>();
         if (cfgFile.isFile()) {
             lines.addAll(Files.readAllLines(cfgFile.toPath(), StandardCharsets.UTF_8));
@@ -207,7 +211,7 @@ final class CfgSync {
             lines.add(0, verLine);
         }
 
-        String[] values = {skin, bgm, badge, ack};
+        String[] values = {skin, bgm, badge, timerfix, ack};
         for (int i = 0; i < MANAGED.length; i++) {
             String key = MANAGED[i];
             int idx = -1;
