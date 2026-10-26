@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.niutie.padhelper"
-    android:versionCode="90"
-    android:versionName="2.9.0">
+    android:versionCode="95"
+    android:versionName="2.9.5">
 
     <!-- targetSdk 35 的包可见性：不声明这一条，getPackageInfo("jp.gungho.pad")
          会永远抛 NameNotFoundException，设置界面就永远显示「未检测到游戏」。 -->

@@ -83,7 +83,9 @@ static int g_badge_enabled = 0;
 static int g_timerfix_enabled = 0;
 /* 上一次看到的 flags 字节，用来只在变化时打日志（避免 50ms 刷屏）。 */
 static int g_timerfix_last_flags = -1;
-
+/* 上一次「清掉暂停位」的时刻。目前只用于日志取证（记录距离清位多久），
+   不再用来驱动任何自动救援——自动扭 phase 已被验证为有害，见 timer_apply 里的说明。 */
+static unsigned long g_timerfix_cleared_ms;
 /* ============ 写存档总闸（v23.6.0 已验证，置 1） ============
    验证方式（2026-10-22，真机 pid 7605，libpad 30735496）：
    - GOT 组 4 个槽：got: ON 报出的 slot 差值 = 0x10f7768 / 0x10f7ab8，
@@ -2766,9 +2768,18 @@ static unsigned long gm_ptr(void) {
      - bit5 清            → 什么都不做（正常通关时 gamePhaseExecClear 单独置的
                             bit1 属于正常流程，绝不去碰） */
 #define IMPL_TIMER_FLAGS_OFF 0xaffa0UL
+#define IMPL_TIMER_OBJ_OFF   0xb0fd8UL /* 计时器对象指针（对象 +0xc = int16 上限秒） */
 #define TIMER_FLAG_ABANDONED 0x02      /* bit1 */
 #define TIMER_FLAG_PAUSED    0x20      /* bit5 */
 #define TIMER_FLAG_ALERTED   0x40      /* bit6 */
+
+/* 当前是否处在「有倒计时的计时关卡」里。只在跨越边界时打一行日志，避免 50ms 刷屏。 */
+static int g_timer_in_stage = 0;
+
+/* 场景 id。cGAMEMAIN::resume @0x6d08f8 与 inactive @0x6d0c7c 都用它判断
+   「是不是计时关卡」：`sub w8,w8,#0x80,lsl#12; cmp w8,#0x386` 相等即 0x80386。
+   放在这里只用于日志与闸门交叉验证，不参与写入判定。 */
+#define IMPL_SCENE_ID_OFF 0x92ac0UL
 
 /* bit6（0x40）=「强制退出弹窗已处理过」的闩锁位。
    全库判据统一是 `(flags & 0x60) == 0x20`（9 处）：
@@ -2781,6 +2792,95 @@ static unsigned long gm_ptr(void) {
    同时 _drawTimeAttackTimer 的判据是 `tst w9,#0x22222222`（不含 bit6），
    置 bit6 不会让倒计时变成 "---.--"，倒计时照常走。
    → 所以「清 bit5 + 置 bit6」= 计时继续且不再弹窗。 */
+
+/* ============ 弹窗救援（unpopup）============
+   现场实测：杀进程重进、恢复中断关时，loadAbandonData @0x96d6c4/0x96d6d4 会
+   把 flags(impl+0xaffa0) 置成 bit1|bit5 = 0x22。下一帧 exec 里
+   gamePhaseInitTimeUp 判定 `(flags & 0x60) == 0x20` 成立 → setPhase 0x39
+   → gamePhaseInitTimeAttackSuspended 建弹窗 → setPhase 0x3a（等待确认）。
+   这整条链只在一帧内完成，50ms 轮询的 timer_apply 抢不过它。
+
+   到达 phase 0x3a 后，用户按 OK → 状态 0x25d3 → 读 pending 块 impl+0x92a88
+   （实测解码值 = 0x20 = gamePhaseInitGameOver）→ 关卡结束。
+
+   救援思路：不碰 .text，直接调游戏自己的 phase setter 把
+   impl+0x929f8 拉回 0x1e（正常游戏阶段），并清掉弹窗对象指针
+   impl+0xbeaa0，同时清 impl+0xb364a。等价于「用户按了 OK 但走的是
+   『计时器仍在跑』那条支路」——游戏自己就是这么回 0x1e 的。
+   setter/getter 都经 GOT 槽解析，并校验 prologue 字节，解析不到就一个字不写。 */
+#define IMPL_PHASE_OFF      0x929f8UL   /* 当前 phase（加密 16 字节容器） */
+#define IMPL_PENDING_OFF    0x92a88UL   /* 待处理事件块（同格式） */
+#define IMPL_POPUP_PTR_OFF  0xbeaa0UL   /* 弹窗对象指针 */
+#define IMPL_TA_HOLD_OFF    0xb364aUL   /* 计时本挂起标记 */
+#define PHASE_GETTER_OFF    0x695dd8UL
+#define PHASE_SETTER_OFF    0x695e30UL
+#define PHASE_NORMAL        0x1e
+#define PHASE_TA_INIT       0x39
+#define PHASE_TA_WAIT       0x3a
+
+typedef int (*phase_get_t)(void *);
+typedef int (*phase_set_t)(void *, int);
+
+/* 解析 libpad 内某个函数指针；prologue 8 字节必须与 dump 一致才算数。 */
+static unsigned long lib_fn(unsigned long off, const unsigned char *want) {
+    unsigned long lib = libpad_base();
+    if (!lib) return 0;
+    unsigned long a = lib + off;
+    if (!addr_mapped(a)) return 0;
+    const unsigned char *p = (const unsigned char *) a;
+    for (int i = 0; i < 8; i++) if (p[i] != want[i]) return 0;
+    return a;
+}
+
+static int phase_read(unsigned long impl) {
+    static const unsigned char pro[8] = {0x69,0x52,0x00,0xb0,0x0a,0xaf,0x87,0x52};
+    unsigned long f = lib_fn(PHASE_GETTER_OFF, pro);
+    if (!f || !impl) return -1;
+    return ((phase_get_t) f) ((void *) (impl + IMPL_PHASE_OFF));
+}
+
+static int phase_write(unsigned long impl, int val) {
+    static const unsigned char pro[8] = {0x49,0xe0,0x00,0xb0,0xab,0x7f,0x88,0x52};
+    unsigned long f = lib_fn(PHASE_SETTER_OFF, pro);
+    if (!f || !impl) return 0;
+    ((phase_set_t) f) ((void *) (impl + IMPL_PHASE_OFF), val);
+    return 1;
+}
+
+static unsigned long impl_ptr(void) {
+    unsigned long gm = gm_ptr();
+    if (!gm) return 0;
+    unsigned long impl = addr_mapped(gm + GM_IMPL_OFF)
+                         ? *(unsigned long *) (gm + GM_IMPL_OFF) : 0;
+    impl &= MASK_TAG;
+    if (!impl || !addr_mapped(impl + IMPL_PHASE_OFF)) return 0;
+    return impl;
+}
+
+/* unpopup：把弹窗撤掉、阶段拉回正常。只写 impl 内的几个字段 + 调 phase setter。 */
+static void unpopup_cmd(void) {
+    unsigned long impl = impl_ptr();
+    if (!impl) { logline("unpopup: impl not ready"); return; }
+    int before = phase_read(impl);
+    logline("unpopup: phase before=%#x", before);
+    if (before != PHASE_TA_INIT && before != PHASE_TA_WAIT) {
+        logline("unpopup: not in popup phase, nothing to do");
+        return;
+    }
+    /* 1) 清弹窗对象指针，让游戏不再持有那个对话框 */
+    if (addr_mapped(impl + IMPL_POPUP_PTR_OFF)) {
+        unsigned long old = *(unsigned long *) (impl + IMPL_POPUP_PTR_OFF);
+        *(unsigned long *) (impl + IMPL_POPUP_PTR_OFF) = 0;
+        logline("unpopup: popup ptr %#lx -> 0", old);
+    }
+    /* 2) 清挂起标记 */
+    if (addr_mapped(impl + IMPL_TA_HOLD_OFF))
+        *(unsigned char *) (impl + IMPL_TA_HOLD_OFF) = 0;
+    /* 3) 阶段拉回 0x1e */
+    if (!phase_write(impl, PHASE_NORMAL)) { logline("unpopup: setter unavailable"); return; }
+    int after = phase_read(impl);
+    logline("unpopup: phase after=%#x", after);
+}
 
 /* 读当前 flags 字节；取不到返回 -1。 */
 static int timer_flags_read(unsigned long *impl_out) {
@@ -2796,36 +2896,91 @@ static int timer_flags_read(unsigned long *impl_out) {
     return (int) *(unsigned char *) a;
 }
 
-/* 每轮调用（50ms 一次）。只在开关打开、且确实需要时写这 1 个字节。
-   写之前重读一次，避免和游戏自己的 resume/loadAbandonData 抢写。 */
+/* 判断「当前是否处于有倒计时的计时关卡」，并顺带取回计时器对象。
+   impl+0xb0fd8 是计时器对象指针，对象 +0xc 是 int16 上限秒数
+   （getter 0xa56e84 就是 `ldrsh w0,[x0,#0xc]; ret`）。
+   上限 > 0 才算计时关卡 —— 大厅 / 普通关卡里这个槽要么为空要么上限为 0。 */
+static int timer_limit_sec(unsigned long impl, unsigned long *obj_out) {
+    unsigned long slot = impl + IMPL_TIMER_OBJ_OFF;
+    if (!addr_mapped(slot)) return 0;
+    unsigned long obj = *(unsigned long *) slot;
+    obj &= MASK_TAG;
+    if (!obj || !addr_mapped(obj + 0x0c)) return 0;
+    int lim = (int) *(short *) (obj + 0x0c);
+    if (obj_out) *obj_out = obj;
+    return (lim > 0 && lim < 100000) ? lim : 0;
+}
+
+/* 每轮调用（50ms 一次）。只在开关打开、且确实在计时关卡里时才写这 1 个字节。
+
+   【为什么是「主动闩住」而不是「等 bit5 出现再清」】
+   杀进程重进恢复中断关时，loadAbandonData @0x96d6c4/0x96d6d4 会在**同一帧内**
+   连续把 bit1 与 bit5 置上；紧接着那一帧的 gamePhaseInitTimeUp / gamePhaseExecVsClear
+   就会用 `(flags & 0x60) == 0x20` 判定并立刻 setPhase 0x39 建弹窗。
+   50ms 轮询的去抖版本永远慢一拍——这就是用户看到「有时能继续、多数直接弹窗」的
+   真正来源，跟倒计时剩多少毫无关系（那个关卡上限 3600 秒，现场已用时间才几百秒）。
+
+   改成主动闩 bit6（0x40）之后：
+     - bit6 已在位时，即使 loadAbandonData 再 or 上 bit5，flags 也是 xx6x，
+       `(flags & 0x60)` = 0x60 ≠ 0x20 → 那一帧的弹窗判定直接落空，抢不抢得到都无所谓；
+     - 绘制 _drawTimeAttackTimer 的判据是 `tst w9,#0x22222222`（不含 bit6），
+       倒计时照常显示、照常走；
+     - bit6 全库无任何清除点，只有 cGAMEMAIN::init（= 新开一局）整字节清零，
+       所以每局自动复位，不会累积到下一局；
+     - 真正把时间走完时，游戏自己的超时结算照旧（我们只挡「恢复中断关」这条弹窗）。
+
+   边界：只写 impl+0xaffa0 这 1 个字节；不碰 .text、不碰 savedata；
+   bit1 仅在 bit5 同时置位时才清（= loadAbandonData 的恢复续关路径），
+   resume 路径本来没有 bit1，不会误伤。 */
 static void timer_apply(void) {
     if (!g_timerfix_enabled) return;
     unsigned long impl = 0;
     int fl = timer_flags_read(&impl);
-    if (fl < 0) return;                      /* 还没进关卡 / 对象未就绪 */
-    if (fl != g_timerfix_last_flags) {
-        logline("timerfix: flags=%#x paused=%d abandoned=%d alerted=%d",
-                fl, (fl & TIMER_FLAG_PAUSED) ? 1 : 0, (fl & TIMER_FLAG_ABANDONED) ? 1 : 0,
-                (fl & TIMER_FLAG_ALERTED) ? 1 : 0);
-        g_timerfix_last_flags = fl;
+    if (fl < 0) { g_timer_in_stage = 0; return; }   /* 还没进关卡 / 对象未就绪 */
+
+    int limit = timer_limit_sec(impl, NULL);
+    if (limit <= 0) {                                /* 不在计时关卡，一个字都不写 */
+        if (g_timer_in_stage) {
+            logline("timerfix: left timeattack stage, flags=%#x", fl);
+            g_timer_in_stage = 0;
+            g_timerfix_last_flags = -1;
+        }
+        return;
     }
-    /* bit5 没置位 → 不是上面两条路径，一个字都不写。
-       正常通关时 gamePhaseExecClear 会单独置 bit1，那属于游戏自己的流程。 */
-    if (!(fl & TIMER_FLAG_PAUSED)) return;
+    if (!g_timer_in_stage) {
+        logline("timerfix: enter timeattack stage limit=%ds flags=%#x", limit, fl);
+        g_timer_in_stage = 1;
+    }
+
     unsigned char *p = (unsigned char *) (impl + IMPL_TIMER_FLAGS_OFF);
     unsigned char now = *p;
-    if (!(now & TIMER_FLAG_PAUSED)) return;  /* 已被别人改掉，重下一轮 */
     unsigned char want = (unsigned char) (now & (unsigned char) ~TIMER_FLAG_PAUSED);
-    /* bit1 只在 bit5 同时置位时才清（= loadAbandonData 的恢复续关路径）。
-       resume 路径本来就没有 bit1，这里不会误伤。 */
-    if (now & TIMER_FLAG_ABANDONED) want = (unsigned char) (want & (unsigned char) ~TIMER_FLAG_ABANDONED);
-    /* 顺手置上「弹窗已处理」闩锁位，让 gamePhaseMove / ExecClear / ExecVsClear
-       那些 `(flags&0x60)==0x20` 的判据全部落空，不再弹强制退出窗。
-       已在则不变。 */
+    if (now & TIMER_FLAG_PAUSED) {
+        /* 只有「暂停位真的在位」才顺手清 bit1 —— 那是 loadAbandonData 的恢复续关签名 */
+        if (now & TIMER_FLAG_ABANDONED)
+            want = (unsigned char) (want & (unsigned char) ~TIMER_FLAG_ABANDONED);
+    } else {
+        /* 没在暂停态时 bit1 一律不动（可能是游戏自己的正常放弃/通关流程） */
+        want = now;
+    }
     want = (unsigned char) (want | TIMER_FLAG_ALERTED);
-    *p = want;
-    logline("timerfix: cleared %#x -> %#x", now, (unsigned) *p);
-    g_timerfix_last_flags = (int) *p;
+    if (want != now) {
+        *p = want;
+        logline("timerfix: flags %#x -> %#x (limit=%ds)", now, (unsigned) *p, limit);
+        g_timerfix_last_flags = (int) *p;
+        if (now & TIMER_FLAG_PAUSED) g_timerfix_cleared_ms = now_ms();
+    } else if (fl != g_timerfix_last_flags) {
+        logline("timerfix: flags=%#x paused=%d abandoned=%d alerted=%d (limit=%ds)",
+                fl, (fl & TIMER_FLAG_PAUSED) ? 1 : 0, (fl & TIMER_FLAG_ABANDONED) ? 1 : 0,
+                (fl & TIMER_FLAG_ALERTED) ? 1 : 0, limit);
+        g_timerfix_last_flags = fl;
+    }
+    /* 【已移除 · 别再放回来】这里曾经自动把 phase 从 0x39/0x3a 扭回 0x1e 做「事后救援」。
+       实测证明有害：gamePhaseWaitTimeAttackSuspended @0x9616c8 在用户按 OK 后自己会走
+       0x961740 那段，用 0x10657e0 的返回值决定「继续(0x1e)」还是「结束(抄 pending 到 phase)」。
+       硬扭 phase 等于绕过这套判定，游戏后续状态机对不上，表现为
+       「弹窗闪一下 → 1~2 秒后自动消失 → 直接掉回大厅」。
+       现在只保留手动 `unpopup` 命令，供人在场时取证；自动路径一概不再干预 phase。 */
 }
 
 static void board_cmd(void) {
@@ -3305,6 +3460,8 @@ static void *worker(void *arg) {
                         }
                     }
                 }
+            } else if (strcmp(cmd, "unpopup") == 0) {
+                unpopup_cmd();
             } else if (strncmp(cmd, "impl ", 5) == 0) {
                 /* impl 相对读（只读，不写任何字节）。impl 是堆对象，不是 lib 相对
                    偏移，必须经 gm_ptr() + GM_IMPL_OFF 取，并剥掉 MTE tag。 */

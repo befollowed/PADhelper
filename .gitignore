@@ -28,3 +28,6 @@ Thumbs.db
 
 # 本地逆向工具（不公开）
 tools/libpad_offsets/
+# 计时本采样脚本：含设备序列号、本机路径与游戏内存偏移，只留本地
+tools/tap_*.sh
+tools/tap_report.py

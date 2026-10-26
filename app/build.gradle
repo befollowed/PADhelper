@@ -15,8 +15,8 @@ android {
         applicationId "com.niutie.padhelper"
         minSdk 26
         targetSdk 35
-        versionCode 90
-        versionName "2.9.0"
+        versionCode 95
+        versionName "2.9.5"
     }
 
     signingConfigs {

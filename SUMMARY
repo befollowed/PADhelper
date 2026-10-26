@@ -13,7 +13,7 @@ LSPosed 模块：《智龙迷城》`jp.gungho.pad` v23.6.0 (230600) 的未拥有
 
 - 游戏：日服《パズル＆ドラゴンズ》`jp.gungho.pad`
 - 版本：**23.6.0**（versionCode 230600），其它版本模块自动失效（不装 hook、设置页锁定）
-- 模块：2.9.0（versionCode 90）
+- 模块：2.9.5（versionCode 95）
 - 系统：Android 8.0+（minSdk 26）/ LSPosed（libxposed API 102）
 
 ## 目录结构
@@ -48,7 +48,7 @@ cd program
 export JAVA_HOME="$HOME/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home"
 export GRADLE_USER_HOME="$PWD/.gradle-home"
 ./gradlew :app:copyApkToProjectRoot --offline
-# 产物：build-output/PADHelper-v2.9.0.apk
+# 产物：build-output/PADHelper-v2.9.5.apk
 ```
 
 注意任务必须带 `:app:` —— `copyApkToProjectRoot` 定义在 `app/build.gradle`，
