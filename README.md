@@ -19,7 +19,7 @@
 版本不符时：
 
 - 游戏进程：**不安装任何 hook**，日志打一条 WARN 后直接返回；
-- 设置页：显示「版本不匹配」提示，四个开关全部禁用，无法修改配置。
+- 设置页：显示「版本不匹配」提示，功能开关全部禁用，无法修改配置。
 
 ## 功能（v2.9.6）
 
@@ -34,6 +34,17 @@
 | 本地存档 | ✅ | 真实值按账号保存在本地，回推时自动恢复 |
 | 多账号 | ✅ | 以 `files/data048.bin` 的哈希区分账号，互不串号 |
 | 版本锁 | ✅ | 仅对 23.6.0 生效，升级游戏后自动失效 |
+| 显示模块图标 | 可选 | 界面分组里的独立开关，控制在桌面是否显示启动图标，不影响模块功能 |
+
+## 界面
+
+<img src="docs/images/settings.jpg" width="330" alt="PAD Helper 设置页">
+
+设置页分「模块状态 / 功能 / 界面 / 关于」四张卡片。功能开关**全部默认关闭**，
+装好模块但不动任何开关时，模块不改变游戏的任何行为。
+
+- **队伍徽章**打开后会带黄底警告：徽章影响战斗数值，存在封号风险。
+- **重新计时**是「限时本防退」的子开关，父开关关闭时不显示、也不生效。
 
 ## 工作原理
 
@@ -116,9 +127,8 @@ program/
 │       │   └── ui/                    Compose 设置页、图标、主题
 │       ├── assets/libpadhelper-probe.so
 │       └── resources/META-INF/xposed/  module.prop / java_init.list / scope.list
-├── tools/libpad_offsets/        版本升级用的偏移翻译工具
-│   ├── fde_align.py             函数长度序列对齐 / 偏移翻译
-│   └── offsets.txt              偏移登记表
+├── docs/images/                 README 配图
+├── tools/                       调试小工具（fswatch / memdump / unpack_libpad）
 ├── build-output/                构建产物（不提交）
 └── module/                      早期 Xposed 骨架（历史遗留，settings.gradle 不引用）
 ```
