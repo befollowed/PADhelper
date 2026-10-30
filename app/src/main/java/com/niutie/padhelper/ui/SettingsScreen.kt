@@ -181,6 +181,7 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                     onBgm = vm::setBgm,
                     onBadge = vm::onBadgeToggle,
                     onTimerFix = vm::setTimerFix,
+                    onReTimer = vm::setReTimer,
                 )
                 AppearanceCard(
                     backdrop = backdrop,
@@ -220,6 +221,7 @@ private fun FeatureCard(
     onBgm: (Boolean) -> Unit,
     onBadge: (Boolean) -> Unit,
     onTimerFix: (Boolean) -> Unit,
+    onReTimer: (Boolean) -> Unit,
 ) {
     GlassCard(backdrop = backdrop, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp)) {
@@ -258,6 +260,19 @@ private fun FeatureCard(
                 onCheckedChange = onTimerFix,
                 enabled = enabled,
             )
+            // 子开关：只在父开关打开时才可拨，否则它的含义无从谈起
+            // （父开关关着时探针整个 timer_apply 都不跑）。
+            AnimatedVisibility(visible = state.timerfix) {
+                FeatureRow(
+                    title = "重新计时",
+                    description = "重新进入限时本时，倒计时从满值重新开始；" +
+                        "关闭则按真实时间流逝，退出多久就少多少，耗尽即判负",
+                    checked = state.retimer,
+                    onCheckedChange = onReTimer,
+                    enabled = enabled,
+                    modifier = Modifier.padding(start = 24.dp),
+                )
+            }
         }
     }
 }

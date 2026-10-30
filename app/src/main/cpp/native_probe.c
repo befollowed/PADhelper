@@ -81,6 +81,10 @@ static int g_badge_enabled = 0;
      - 不碰 .text（铁律：改 .text 会静默退出）。
    默认关闭：用户不显式打开就一个字节都不写，行为与没装模块一致。 */
 static int g_timerfix_enabled = 0;
+/* 「重新计时」子开关，只在 g_timerfix_enabled 打开时才有意义。
+     0（默认）= 墙钟自然流逝：退出多久就少多少，耗尽即判负；
+     1        = 重进限时本时倒计时从满值重新开始（v2.9.5 及以前的旧行为）。 */
+static int g_retimer_enabled = 0;
 /* 上一次看到的 flags 字节，用来只在变化时打日志（避免 50ms 刷屏）。 */
 static int g_timerfix_last_flags = -1;
 /* 上一次「清掉暂停位」的时刻。目前只用于日志取证（记录距离清位多久），
@@ -2532,6 +2536,7 @@ static void write_status_file(void) {
     fprintf(f, "bgm %d\n", g_bgm_enabled);
     fprintf(f, "badge %d\n", g_badge_enabled);
     fprintf(f, "timerfix %d\n", g_timerfix_enabled);
+    fprintf(f, "retimer %d\n", g_retimer_enabled);
     fclose(f);
     if (rename(tmp, p) != 0) remove(tmp);
 }
@@ -2558,8 +2563,8 @@ static void load_skin_cfg(void) {
     /* 三个功能开关先攒在局部变量里，等整份文件读完、确认 cfgver 之后再生效。
        这样「文件里没有版本行」的遗留文件不会在解析途中就把开关打开。 */
     int cfg_ver = 0;
-    int v_skin = 0, v_bgm = 0, v_badge = 0, v_timer = 0;
-    int has_skin = 0, has_bgm = 0, has_badge = 0, has_timer = 0;
+    int v_skin = 0, v_bgm = 0, v_badge = 0, v_timer = 0, v_retimer = 0;
+    int has_skin = 0, has_bgm = 0, has_badge = 0, has_timer = 0, has_retimer = 0;
     while (fgets(line, sizeof(line), f)) {
         unsigned long off = 0, val = 0;
         int w = 4;
@@ -2642,6 +2647,12 @@ static void load_skin_cfg(void) {
             has_timer = 1;
             continue;
         }
+        /* 「重新计时」子开关：只在 timerfix 打开时有意义。 */
+        if (strncmp(line, "retimer ", 8) == 0) {
+            v_retimer = atoi(line + 8) ? 1 : 0;
+            has_retimer = 1;
+            continue;
+        }
         /* badge_ack 只给界面用，探针不解析，这里显式跳过免得误判成 pin */
         if (sscanf(line, "pin %lx %d %lx", &off, &w, &val) == 3) {
             if (n < PIN_MAX) {
@@ -2685,31 +2696,40 @@ static void load_skin_cfg(void) {
             }
             g_timerfix_enabled = v_timer;
         }
+        if (has_retimer) {
+            if (v_retimer != g_retimer_enabled) logline("cfg: retimer=%d", v_retimer);
+            g_retimer_enabled = v_retimer;
+        }
         if (!has_skin && !has_bgm && !has_badge && !has_timer)
             logline("cfg: ver=%d but no switch lines, keep defaults", cfg_ver);
     } else {
         /* 遗留文件：强制全关。只在值真的变过时打日志，避免每轮刷屏。 */
-        if (g_skin_enabled || g_bgm_enabled || g_badge_enabled || g_timerfix_enabled) {
+        if (g_skin_enabled || g_bgm_enabled || g_badge_enabled || g_timerfix_enabled
+            || g_retimer_enabled) {
             logline("cfg: legacy file (no cfgver), forcing all switches off "
-                    "(was skin=%d bgm=%d badge=%d timerfix=%d)",
-                    g_skin_enabled, g_bgm_enabled, g_badge_enabled, g_timerfix_enabled);
+                    "(was skin=%d bgm=%d badge=%d timerfix=%d retimer=%d)",
+                    g_skin_enabled, g_bgm_enabled, g_badge_enabled, g_timerfix_enabled,
+                    g_retimer_enabled);
         }
         g_skin_enabled = 0;
         g_bgm_enabled = 0;
         g_badge_enabled = 0;
         g_timerfix_enabled = 0;
+        g_retimer_enabled = 0;
     }
     /* 一行把「这次重读到底采纳了什么」写清楚。排查时只要 grep 这一行，
        就能分清是文件没变、版本不对、还是开关值没写进去。 */
-    logline("cfg: ver=%d switches skin=%d bgm=%d badge=%d timerfix=%d, %d pins",
+    logline("cfg: ver=%d switches skin=%d bgm=%d badge=%d timerfix=%d retimer=%d, %d pins",
             (cfg_ver >= CFG_VER_MIN) ? cfg_ver : 0,
-            g_skin_enabled, g_bgm_enabled, g_badge_enabled, g_timerfix_enabled, n);
+            g_skin_enabled, g_bgm_enabled, g_badge_enabled, g_timerfix_enabled,
+            g_retimer_enabled, n);
     /* 版本 + 三个开关的最终取值落一个状态文件，给界面回显用。
        用四元组做变化判断：只比 cfgver 会漏掉「版本没变但开关被拨动」的情况。 */
     {
         int ver = (cfg_ver >= CFG_VER_MIN) ? cfg_ver : 0;
-        int sig = (ver << 4) | (g_skin_enabled << 3) | (g_bgm_enabled << 2)
-                  | (g_badge_enabled << 1) | g_timerfix_enabled;
+        int sig = (ver << 8) | (g_skin_enabled << 7) | (g_bgm_enabled << 6)
+                  | (g_badge_enabled << 5) | (g_timerfix_enabled << 4)
+                  | (g_retimer_enabled << 3);
         if (sig != g_status_sig) {
             g_status_sig = sig;
             g_cfg_ver_applied = ver;
@@ -2775,6 +2795,108 @@ static unsigned long gm_ptr(void) {
 
 /* 当前是否处在「有倒计时的计时关卡」里。只在跨越边界时打一行日志，避免 50ms 刷屏。 */
 static int g_timer_in_stage = 0;
+
+/* ---- 墙钟自然流逝（「重新计时」子开关关闭时生效）----
+   已用时间 getter _ZN9cGAMEMAIN... @0x6b94b8 的分支顺序（逐条反汇编确认）：
+     bit1 或 bit5 置 → 直接返回「上限」（满值）  ← 这就是重进后从 3600 开始的直接原因
+     bit2 清        → 返回 0.0（计时还没开始）
+     bit4 置        → return decrypt(impl+0xaffa8) / 100.0    ← 我们走这一条
+     否则           → (now - timespec@impl+0xaff80) 的秒数
+   所以只要把「已用时间」按百分秒异或加密写进 impl+0xaffa8、并置 bit4，
+   绘制段（remaining = limit - getter()）、_calcPlayer 的超时判定、
+   以及 activate 的离线回补（bit4 置位时它会整段跳过 tbnz w9,#4）就自动一致：
+     - 不需要碰 .text；
+     - 不需要知道游戏内部用哪个时钟源（0x104bd60 到底 monotonic 还是 realtime）；
+     - 不会和游戏自己的计时器双算（bit4 置位后 0xaff80/0xaff98 两条都不再参与）。
+   跨进程续接只需要把「进入关卡的墙钟时刻」落一个文件，重启后按它算出已用秒。 */
+#define IMPL_TIMER_ELAPSED_OFF 0xaffa8UL /* u32，百分秒，异或 0x33C2F3A1 */
+#define TIMER_FLAG_RUNNING     0x04      /* bit2：计时进行中 */
+#define TIMER_FLAG_SNAPSHOT    0x10      /* bit4：已用时间以 impl+0xaffa8 为准 */
+#define TIMER_ELAPSED_XOR      0x33C2F3A1UL
+
+/* 墙钟状态。
+   g_wall_limit  本关上限秒数（也当作关卡身份）；0 = 当前不在计时关卡里。
+   g_wall_t0     本关的进入时刻（Unix 毫秒）。已用时间 = now - t0。
+   g_wall_exit_ms 首次观察到 limit 变 0 的时刻；关卡间有短暂空档，不能立刻清续接点。 */
+static int g_wall_limit;
+static long g_wall_t0;
+static unsigned long g_wall_exit_ms;
+static long g_wall_last_used = -1;   /* 上一次打日志时的已用秒 */
+static int g_retimer_prev = -1;      /* 上一帧的「重新计时」取值，用于检测拨动 */
+
+/* 「离开关卡」的判定时长：limit 必须连续为 0 这么久才算真的走了。
+   为什么需要它：阶段切换的瞬间 limit 偶尔会读到 0，那一两帧不是离开关卡。
+   为什么不能太长：玩家打完一关、在结算画面停留几秒又重开同一关（上限相同），
+   若锚点还留着就会被当成「续接」，新一局直接少掉一大截时间。
+   一两帧（50~100ms）与人在结算画面上点几下（≥2s）差得很远，2 秒足够区分。 */
+#define WALL_STAGE_LEFT_MS 2000UL
+
+static long now_wall_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (long) ts.tv_sec * 1000L + (long) (ts.tv_nsec / 1000000L);
+}
+
+/* 落盘路径：和 probe.status / skin.cfg 同目录，走 base_dir()。 */
+static const char *timer_state_path(void) {
+    static char p[320];
+    snprintf(p, sizeof(p), "%s/timerfix.txt", base_dir());
+    return p;
+}
+
+/* 记下「本关上限 + 进入关卡的墙钟时刻」。跨进程续接全靠这两个数。
+   用 tmp + rename 写，和 write_status_file 一致：进程被 kill 时不会留下半个文件，
+   而「进程被 kill」恰恰是这里最需要正确处理的那条路径。 */
+static void timer_state_save(int limit, long t0) {
+    if (limit <= 0 || t0 <= 0) return;
+    char tmp[340];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", timer_state_path());
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "limit %d\n", limit);
+    fprintf(f, "t0 %ld\n", t0);
+    /* 记下写这份文件的进程。同一个进程里再次进关 = 新一局（旧续接点已作废），
+       只有跨进程读回才代表「上次被杀了、这次要接着走」。 */
+    fprintf(f, "pid %d\n", (int) getpid());
+    fclose(f);
+    if (rename(tmp, timer_state_path()) != 0) remove(tmp);
+}
+
+/* 读回落盘值。满足以下条件才算「可以续接」：
+     limit 与当前关卡一致、t0 > 0、这份记录是**别的进程**写的、
+     0 <= now - t0 <= 24 小时。
+   注意这里**不**用「now-t0 必须小于上限」来兜底：超过上限恰恰是本功能要如实
+   表现的场景 —— 玩家离开的时间比关卡时长还久，回来就该判负，不能偷偷送一局。
+   24 小时只是「这条记录早就没意义了」的兜底，别让它变成无限期有效。
+   负数说明系统时间被回拨，不认。t0 与时长的单位都是毫秒。 */
+static int timer_state_load(int limit, long *t0_out) {
+    FILE *f = fopen(timer_state_path(), "r");
+    if (!f) return 0;
+    char line[96];
+    int fl = 0, fpid = 0;
+    long t0 = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "limit ", 6) == 0) fl = atoi(line + 6);
+        else if (strncmp(line, "t0 ", 3) == 0) t0 = atol(line + 3);
+        else if (strncmp(line, "pid ", 4) == 0) fpid = atoi(line + 4);
+    }
+    fclose(f);
+    if (fl != limit || t0 <= 0) return 0;
+    /* 同一个进程写的 → 是这一局自己的记录，不是「上次被杀留下的」，不续。 */
+    if (fpid == (int) getpid()) return 0;
+    long used_ms = now_wall_ms() - t0;
+    if (used_ms < 0) return 0;                       /* 系统时间被回拨 */
+    if (used_ms > 86400000L) return 0;               /* 24 小时前的记录，作废 */
+    if (t0_out) *t0_out = t0;
+    return 1;
+}
+
+static void timer_state_clear(void) {
+    remove(timer_state_path());
+    char tmp[340];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", timer_state_path());
+    remove(tmp);
+}
 
 /* 场景 id。cGAMEMAIN::resume @0x6d08f8 与 inactive @0x6d0c7c 都用它判断
    「是不是计时关卡」：`sub w8,w8,#0x80,lsl#12; cmp w8,#0x386` 相等即 0x80386。
@@ -2929,9 +3051,10 @@ static int timer_limit_sec(unsigned long impl, unsigned long *obj_out) {
        所以每局自动复位，不会累积到下一局；
      - 真正把时间走完时，游戏自己的超时结算照旧（我们只挡「恢复中断关」这条弹窗）。
 
-   边界：只写 impl+0xaffa0 这 1 个字节；不碰 .text、不碰 savedata；
-   bit1 仅在 bit5 同时置位时才清（= loadAbandonData 的恢复续关路径），
-   resume 路径本来没有 bit1，不会误伤。 */
+   边界：只写 impl+0xaffa0 / impl+0xaffa8 这几个字节 + 一个自建的小文本文件；
+   不碰 .text、不碰 savedata。bit1 只在两种情况下清：bit5 同时置位时（就是
+   loadAbandonData 的恢复续关签名），以及墙钟托管期间（那时已用时间由我们
+   全权供给，bit1 会让 getter 直接短路返回满值）。 */
 static void timer_apply(void) {
     if (!g_timerfix_enabled) return;
     unsigned long impl = 0;
@@ -2945,28 +3068,111 @@ static void timer_apply(void) {
             g_timer_in_stage = 0;
             g_timerfix_last_flags = -1;
         }
+        if (g_wall_limit) {                          /* 关卡间有短暂空档，不能立刻清续接点 */
+            if (!g_wall_exit_ms) {
+                g_wall_exit_ms = now_ms();
+            }
+            if (now_ms() - g_wall_exit_ms >= WALL_STAGE_LEFT_MS) {
+                timer_state_clear();
+                g_wall_limit = 0;
+                g_wall_t0 = 0;
+                g_wall_exit_ms = 0;
+                g_wall_last_used = -1;
+            }
+        }
         return;
     }
-    if (!g_timer_in_stage) {
+    g_wall_exit_ms = 0;
+
+    /* 用户中途拨了「重新计时」→ 丢掉本关的墙钟锚点，下一段按新语义重新决定。 */
+    if (g_retimer_prev != g_retimer_enabled) {
+        if (g_retimer_prev >= 0)
+            logline("timerfix: retimer %d -> %d", g_retimer_prev, g_retimer_enabled);
+        g_retimer_prev = g_retimer_enabled;
+        g_wall_limit = 0;
+        g_wall_t0 = 0;
+        g_wall_last_used = -1;
+    }
+
+    if (limit != g_wall_limit) {                     /* 换关卡了（0 = 之前不在关卡） */
         logline("timerfix: enter timeattack stage limit=%ds flags=%#x", limit, fl);
         g_timer_in_stage = 1;
+
+        /* 决定本关的 t0：
+             1) 「重新计时」打开 → 完全不托管已用时间（等于 v2.9.5 的行为）；
+             2) 落盘值可信（同一上限、是**别的进程**写的、且不是 24 小时前的旧账）
+                → 沿用上次的 t0，把中途退出的时间如实扣掉（哪怕已经超过上限）；
+             3) 其余情况 = 新开一局，t0 从此刻算起。
+
+           为什么不去识别「恢复续关」的 flags 签名（bit1|bit5）：那个签名由
+           loadAbandonData 在场景加载时置上，而我们 50ms 轮询未必逮得到那一帧
+           —— 这正是旧版本「有时能继续、多数直接弹窗」的随机性来源。
+           改成「只看落盘点是否可信」之后，判定不再依赖采样时机。
+
+           为什么 enter 判据是 limit != g_wall_limit 而不是 !g_timer_in_stage：
+           阶段切换的瞬间 limit 偶尔会读到 0，那会把 g_timer_in_stage 清掉；
+           若拿它当判据，limit 一抖动就会重新走一遍决策、把锚点重置成「现在」，
+           已经走过的时间就白送了。g_wall_limit 要等 limit 连续为 0 满
+           WALL_STAGE_LEFT_MS 之后才清，抖动期间它仍是本关的上限，不会误判。 */
+        g_wall_limit = limit;
+        if (g_retimer_enabled) {
+            g_wall_t0 = 0;
+            timer_state_clear();
+        } else {
+            long saved = 0;
+            int resumed = timer_state_load(limit, &saved);
+            g_wall_t0 = resumed ? saved : now_wall_ms();
+            timer_state_save(limit, g_wall_t0);
+            logline("timerfix: wall clock %s t0=%ld limit=%ds used=%lds",
+                    resumed ? "resume" : "new stage", g_wall_t0, limit,
+                    (now_wall_ms() - g_wall_t0) / 1000);
+        }
+        g_wall_last_used = -1;
     }
 
     unsigned char *p = (unsigned char *) (impl + IMPL_TIMER_FLAGS_OFF);
     unsigned char now = *p;
-    unsigned char want = (unsigned char) (now & (unsigned char) ~TIMER_FLAG_PAUSED);
+    unsigned char want = now;
     if (now & TIMER_FLAG_PAUSED) {
         /* 只有「暂停位真的在位」才顺手清 bit1 —— 那是 loadAbandonData 的恢复续关签名 */
+        want = (unsigned char) (want & (unsigned char) ~TIMER_FLAG_PAUSED);
         if (now & TIMER_FLAG_ABANDONED)
             want = (unsigned char) (want & (unsigned char) ~TIMER_FLAG_ABANDONED);
-    } else {
-        /* 没在暂停态时 bit1 一律不动（可能是游戏自己的正常放弃/通关流程） */
-        want = now;
     }
     want = (unsigned char) (want | TIMER_FLAG_ALERTED);
+
+    /* ---- 墙钟自然流逝 ----
+       只有在关卡里、且「重新计时」关着、且已拿到 t0 时才托管。
+       bit2 置 = 计时进行中（不置的话 getter 直接返回 0.0）；
+       bit4 置 = 已用时间以 impl+0xaffa8 为准（getter 走解密分支，
+                  同时让 activate 的离线回补与 EnemyDead 的快照都自动跳过）。 */
+    if (!g_retimer_enabled && g_wall_t0 > 0) {
+        long used_ms = now_wall_ms() - g_wall_t0;
+        if (used_ms < 0) used_ms = 0;               /* 系统时间被回拨 → 视为刚开始 */
+        long used_cs = used_ms / 10;                /* 百分秒 */
+        if (used_cs > 0x7fffffffL) used_cs = 0x7fffffffL;
+        unsigned int enc = (unsigned int) ((unsigned long) used_cs ^ TIMER_ELAPSED_XOR);
+        unsigned long ea = impl + IMPL_TIMER_ELAPSED_OFF;
+        if (addr_mapped(ea)) *(unsigned int *) ea = enc;
+        /* bit1 必须清掉：getter 的分支顺序是 bit1/bit5 → bit2 → bit4，
+           bit1 残留时它直接返回「上限」，前一行写的加密值根本读不到。
+           墙钟模式下已用时间由我们全权托管，bit1 的语义（放弃/中断）不再成立。 */
+        want = (unsigned char) (want & (unsigned char) ~TIMER_FLAG_ABANDONED);
+        want = (unsigned char) (want | TIMER_FLAG_RUNNING | TIMER_FLAG_SNAPSHOT);
+
+        long used_s = used_cs / 100;
+        if (used_s != g_wall_last_used) {
+            if (g_wall_last_used < 0 || used_s % 30 == 0)
+                logline("timerfix: wall used=%lds remaining=%lds (limit=%ds)",
+                        used_s, (long) limit - used_s, limit);
+            g_wall_last_used = used_s;
+        }
+    }
+
     if (want != now) {
         *p = want;
-        logline("timerfix: flags %#x -> %#x (limit=%ds)", now, (unsigned) *p, limit);
+        logline("timerfix: flags %#x -> %#x (limit=%ds%s)", now, (unsigned) *p, limit,
+                g_retimer_enabled ? ", retimer" : ", wall");
         g_timerfix_last_flags = (int) *p;
         if (now & TIMER_FLAG_PAUSED) g_timerfix_cleared_ms = now_ms();
     } else if (fl != g_timerfix_last_flags) {

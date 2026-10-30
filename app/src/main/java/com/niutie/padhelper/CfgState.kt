@@ -15,6 +15,16 @@ data class CfgState(
      * 见 `native_probe.c` 里 `timer_apply()` 的注释。
      */
     val timerfix: Boolean = false,
+    /**
+     * 「重新计时」子开关，只在 [timerfix] 打开时有意义。
+     *
+     * - `true`：杀进程重进限时本时，倒计时从满值重新开始（v2.9.5 及以前的行为）。
+     * - `false`（默认）：按墙钟自然流逝 —— 剩余 = 上限 − (现在 − 进入关卡的时刻)。
+     *   中途退出多久就少多少，真的耗尽就判负结束。
+     *
+     * 见 `native_probe.c` 里 `timer_apply()` 的注释。
+     */
+    val retimer: Boolean = false,
     /** 徽章风险提示是否已被接受过；探针不解析这个 key，只有界面自己用。 */
     val badgeAck: Boolean = false,
 )

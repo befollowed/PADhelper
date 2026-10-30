@@ -104,6 +104,7 @@ class ConfigBridge(context: Context) {
         bgm = local.getBoolean(KEY_BGM, false),
         badge = local.getBoolean(KEY_BADGE, false),
         timerfix = local.getBoolean(KEY_TIMERFIX, false),
+        retimer = local.getBoolean(KEY_RETIMER, false),
         // 只有「确认过风险、且版本对得上」才算已接受。
         // v2.4 之前没有版本号这一说，那些 ack 一律作废 —— 用户上次是在
         // v2.1 的实验性版本里点的「接受」，不代表他知道现在这版也有风险。
@@ -118,6 +119,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_BGM, local.getBoolean(KEY_BGM, false))
             .putBoolean(KEY_BADGE, local.getBoolean(KEY_BADGE, false))
             .putBoolean(KEY_TIMERFIX, local.getBoolean(KEY_TIMERFIX, false))
+            .putBoolean(KEY_RETIMER, local.getBoolean(KEY_RETIMER, false))
             .putBoolean(KEY_BADGE_ACK, ack)
             .putInt(KEY_ACK_VER, if (ack) ACK_VER else 0)
             .apply()
@@ -132,6 +134,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_BGM, state.bgm)
             .putBoolean(KEY_BADGE, state.badge)
             .putBoolean(KEY_TIMERFIX, state.timerfix)
+            .putBoolean(KEY_RETIMER, state.retimer)
             .putBoolean(KEY_BADGE_ACK, state.badgeAck)
             .putInt(KEY_ACK_VER, if (state.badgeAck) ACK_VER else 0)
             .commit()
@@ -162,6 +165,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_BGM, rp.getBoolean(KEY_BGM, false))
             .putBoolean(KEY_BADGE, rp.getBoolean(KEY_BADGE, false))
             .putBoolean(KEY_TIMERFIX, rp.getBoolean(KEY_TIMERFIX, false))
+            .putBoolean(KEY_RETIMER, rp.getBoolean(KEY_RETIMER, false))
             .putBoolean(KEY_BADGE_ACK, ack)
             .putInt(KEY_ACK_VER, if (ack) ACK_VER else 0)
             .commit()
@@ -176,6 +180,7 @@ class ConfigBridge(context: Context) {
             .putBoolean(KEY_BGM, state.bgm)
             .putBoolean(KEY_BADGE, state.badge)
             .putBoolean(KEY_TIMERFIX, state.timerfix)
+            .putBoolean(KEY_RETIMER, state.retimer)
             .putBoolean(KEY_BADGE_ACK, state.badgeAck)
             .putInt(KEY_ACK_VER, if (state.badgeAck) ACK_VER else 0)
             .apply()
@@ -249,6 +254,8 @@ class ConfigBridge(context: Context) {
         const val KEY_BGM = "bgm"
         const val KEY_BADGE = "badge"
         const val KEY_TIMERFIX = "timerfix"
+        /** 「重新计时」子开关；探针仅在 [KEY_TIMERFIX] 也打开时才看它。 */
+        const val KEY_RETIMER = "retimer"
         const val KEY_BADGE_ACK = "badge_ack"
 
         /**

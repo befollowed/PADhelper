@@ -94,6 +94,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setTimerFix(enabled: Boolean) = commit(_state.value.copy(timerfix = enabled))
 
+    /**
+     * 「重新计时」子开关，只在「限时本防退」打开时有意义。
+     *
+     * 打开 = 重进限时本时倒计时从满值重新开始（旧行为，会白送时间）；
+     * 关闭（默认）= 按墙钟自然流逝，退出多久就少多少，耗尽即判负。
+     */
+    fun setReTimer(enabled: Boolean) = commit(_state.value.copy(retimer = enabled))
+
     fun setShowIcon(show: Boolean) {
         _showIcon.value = show
         LauncherIcon.apply(getApplication<Application>(), show)
